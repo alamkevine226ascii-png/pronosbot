@@ -1,0 +1,17 @@
+{
+  "$schema": "https://openapi.vercel.sh/vercel.json",
+  "framework": "nextjs",
+  "buildCommand": "next build",
+  "installCommand": "bun install",
+  "devCommand": "next dev",
+  "regions": ["cdg1"],
+  "functions": {
+    "src/app/api/matchs/route.ts": {
+      "maxDuration": 60
+    },
+    "src/app/api/web-search/route.ts": {
+      "maxDuration": 60
+    }
+  },
+  "crons": []
+}

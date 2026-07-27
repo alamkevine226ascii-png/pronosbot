@@ -1,13 +1,12 @@
 import type { NextConfig } from "next";
-import path from "path";
 
 const nextConfig: NextConfig = {
   output: "standalone",
-  // FIX turbopack.root — Next 16.2.11 exige cette config quand le projet est dans
-  // un sous-dossier (ex: /home/z/my-project/pronobot_fixed). Sans ça, le build
-  // échoue avec "couldn't find the Next.js package".
+  // FIX turbopack.root — Next 16.2+ exige cette config quand le projet est dans
+  // un sous-dossier. On utilise process.cwd() (compatible ESM/Turbopack) au lieu
+  // de __dirname qui ne marche pas en ESM.
   turbopack: {
-    root: path.join(__dirname),
+    root: process.cwd(),
   },
   typescript: {
     ignoreBuildErrors: false,

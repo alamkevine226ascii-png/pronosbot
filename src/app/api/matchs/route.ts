@@ -324,40 +324,49 @@ function generatePronostic(match: any): any {
   const total = inv1 + invN + inv2;
   let p1 = inv1/total, pN = invN/total, p2 = inv2/total;
 
-  // === FAVORI SELON LES COTES (référence absolue) ===
-  // Les cotes intègrent TOUT (forme, blessures, contexte, météo).
-  // L'ajustement de forme ne doit JAMAIS inverser le favori des cotes.
-  // Stratégie : on borne l'ajustement à 80% de l'écart initial entre p1 et p2.
-  // → Le favori des cotes reste favori, mais la forme peut resserrer l'écart.
-  // (Ancien code : ±5% fixe + swap post-normalisation. Le swap inversait
-  // p1 et p2 SANS toucher aux associations d'équipes → probas désynchronisées
-  // des noms → "Victoire France" affichée avec la proba de l'Espagne.)
+  // === BUG #33 FIX : favori selon les COTES (référence absolue, calculé AVANT tout ajustement) ===
+  // On détermine le favori à partir des cotes brutes, AVANT d'appliquer quoi que ce soit.
+  // Cet objet `cotesFavorite` est utilisé pour la sélection de paris (1X2, DC, HT/FT) afin
+  // que la recommandation suive TOUJOURS le favori des cotes, même si l'ajustement de forme
+  // (appliqué plus bas) inverse temporairement p1 et p2 dans les probas affichées.
+  //
+  // Avant : `favTeam = p1 > p2 ? 'home' : 'away'` était calculé APRÈS l'ajustement de forme.
+  // Si la forme inversait le favori, la recommandation de paris partait sur le mauvais favori
+  // → "Victoire Equipe 2 ou Nul" affiché alors que cotes donnaient Equipe 1 favori.
+  const cotesFavorite: 'home' | 'away' = p1 > p2 ? 'home' : 'away';
+
+  // === BUG #33 FIX : ajustement de forme désactivé pour les cotes RÉELLES ===
+  // Les bookmakers (DraftKings, API-Football, Football-Data) ont DÉJÀ pricé la forme,
+  // les blessures, le contexte, la météo, etc. dans leurs cotes. Appliquer notre propre
+  // ajustement de forme par-dessus crée un DOUBLE COMPTAGE :
+  //   1. Bookmaker voit que home est en mauvaise forme → cote home = 2.20 (45%)
+  //   2. Notre code voit cote 2.20 + mauvaise forme → enlève encore 8% sur home
+  //   3. Résultat : home passe à 35%, away monte à 36% → favori inversé → mauvais paris
+  //
+  // Pour les cotes RÉELLES, on n'ajuste pas. Pour les cotes ESTIMÉES (espn_predictor,
+  // form_based), la forme apporte une vraie info car les cotes n'intègrent pas la forme.
+  const realOddsSources = ['draftkings', 'api_football', 'football_data'];
+  const isRealOdds = realOddsSources.includes(match.odds_source);
+  const formAdjMultiplier = isRealOdds ? 0.0 : 1.0; // 0% pour cotes réelles, 100% pour estimées
+
   const initialGap = Math.abs(p1 - p2);
-  // ⚠️ CORRECTION : l'ajustement s'applique dans les 2 directions (p1+adj ET p2-adj),
-  // donc le swing total = 2 × formAdj. Pour empêcher l'inversion : 2 × maxFormAdj < initialGap.
-  // Donc maxFormAdj = initialGap × 0.40 (marge de sécurité de 20%).
-  // Plancher réduit à 0.005 pour les écarts très faibles (évite l'égalisation parfaite).
   const maxFormAdj = Math.max(0.005, initialGap * 0.40);
 
-  // Form adjustment — limité pour ne PAS inverser le favori des cotes.
   const hf = match.home_form || {}, af = match.away_form || {};
   const formDiff = (hf.pts_moy||1) - (af.pts_moy||1);
   // formDiff/8 = ±12.5% max théorique, mais on borne à maxFormAdj (anti-inversion)
-  const formAdj = Math.max(-maxFormAdj, Math.min(maxFormAdj, formDiff/8));
+  // Multiplié par formAdjMultiplier (0 pour cotes réelles → pas d'ajustement)
+  const formAdj = Math.max(-maxFormAdj, Math.min(maxFormAdj, formDiff/8)) * formAdjMultiplier;
   p1 = Math.max(0.05, Math.min(0.85, p1 + formAdj));
   p2 = Math.max(0.05, Math.min(0.85, p2 - formAdj));
   pN = Math.max(0.10, Math.min(0.45, 1-p1-p2));
   const t2 = p1+pN+p2; p1/=t2; pN/=t2; p2/=t2;
 
-  // ❌ SUPPRIMÉ : l'ancien bloc swap (cotesFavorite === 'home' && p2 > p1) était
-  // un bug critique. Il échangeait les VALEURS de p1 et p2 sans toucher aux
-  // associations d'équipes, ce qui désynchronisait complètement les probas :
-  //  - p1 restait "proba domicile" mais contenait la proba de l'extérieur
-  //  - tous les paris générés ensuite (1X2, DC, HT/FT, buteur...) avaient
-  //    l'équipe A avec la proba de B et inversement
-  //  - l'UI affichait "Victoire France" avec la proba de l'Espagne
-  // Avec la borne maxFormAdj = 80% de l'écart initial, l'inversion est
-  // mathématiquement impossible → plus besoin de swap.
+  // Sécurité : si malgré tout p1/p2 sont inversés vs les cotes (ne devrait pas arriver
+  // avec formAdj=0 pour cotes réelles), on re-force le favori des cotes.
+  // (réservé aux cas pathologiques où formAdj fait basculer pour cotes estimées)
+  // IMPORTANT : on ne swappe PAS p1 et p2 — on utilise juste `cotesFavorite` plus bas
+  // pour la sélection de paris, ce qui évite le bug historique de désynchronisation.
 
   // Context adjustment
   // BUG #21 FIX : utiliser ctx.enjeu (0.3 → 1.0) pour moduler l'ajustement du nul.
@@ -398,13 +407,16 @@ function generatePronostic(match: any): any {
 
   // === GENERER TOUS LES PARIS POSSIBLES (varies et attractifs) ===
   const allBets: any[] = [];
-  const favTeam = p1 > p2 ? 'home' : 'away';
-  const favName = p1 > p2 ? match.home_name_fr : match.away_name_fr;
-  const favProba = Math.max(p1, p2);
-  const underdogName = p1 > p2 ? match.away_name_fr : match.home_name_fr;
-  const underdogProba = Math.min(p1, p2);
+  // BUG #33 FIX : utiliser cotesFavorite (calculé AVANT ajustement) au lieu de p1 > p2.
+  // favTeam suit maintenant TOUJOURS le favori des cotes, même si la forme a inversé les probas.
+  // favProba reste basé sur les probas ajustées (pour la précision du calcul d'EV).
+  const favTeam = cotesFavorite;
+  const favName = favTeam === 'home' ? match.home_name_fr : match.away_name_fr;
+  const favProba = favTeam === 'home' ? p1 : p2;
+  const underdogName = favTeam === 'home' ? match.away_name_fr : match.home_name_fr;
+  const underdogProba = favTeam === 'home' ? p2 : p1;
 
-  // 1. 1X2 (classique)
+  // 1. 1X2 (classique) — pari sur le favori des cotes
   allBets.push({ type: '1X2', sous_type: 'Victoire', choix: favTeam === 'home' ? '1' : '2', selection: `Victoire ${favName}`, probabilite: favProba, cote: favTeam === 'home' ? cotes.cote_1 : cotes.cote_2, ev: favProba * (favTeam === 'home' ? cotes.cote_1 : cotes.cote_2) - 1, risque: 1-favProba });
 
   // 2. Double Chance — LES 3 OPTIONS (1N, 12, N2) pour couvrir tous les cas

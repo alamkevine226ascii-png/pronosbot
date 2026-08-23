@@ -1046,6 +1046,9 @@ function BestBetCard({ pari }: { pari: Pari }) {
   const risk = getRiskInfo(pari.probabilite);
   const value = getValueQuality(pari.ev ?? 0);
   const betStyle = getBetTypeStyle(pari.type);
+  // Un pari recommandé ne doit JAMAIS afficher "Non" (contradictoire). On force au minimum Standard.
+  const confidence =
+    value.key === 'non' ? { key: 'standard', short: 'Standard', className: 'text-zinc-400' } : value;
 
   return (
     <motion.div
@@ -1140,9 +1143,9 @@ function BestBetCard({ pari }: { pari: Pari }) {
               <span className="text-[9px] font-bold uppercase tracking-widest text-amber-300/80">
                 Confiance
               </span>
-              <span className={`inline-flex items-center gap-1 rounded-full border border-amber-400/40 bg-amber-400/15 px-2 py-1 text-[10px] font-black uppercase tracking-wide ${value.className}`} style={{ textShadow: 'none' }}>
+              <span className={`inline-flex items-center gap-1 rounded-full border border-amber-400/40 bg-amber-400/15 px-2 py-1 text-[10px] font-black uppercase tracking-wide ${confidence.className}`} style={{ textShadow: 'none' }}>
                 <Crown className="h-3 w-3" />
-                {value.short}
+                {confidence.short}
               </span>
             </div>
           </div>
@@ -1360,6 +1363,14 @@ function CombinerCard({ combiner }: { combiner: Combiner }) {
               >
                 {combiner.type}
               </span>
+              {combiner.probabilite < 0.25 ? (
+                <span
+                  className="inline-flex w-fit max-w-full items-center rounded-full border border-red-500/40 bg-red-500/15 px-2.5 py-0.5 text-[11px] font-black uppercase tracking-wide text-red-400"
+                  style={{ textShadow: 'none' }}
+                >
+                  ⚠ À éviter (risque élevé)
+                </span>
+              ) : null}
               <span className="truncate text-[10px] uppercase tracking-wide text-zinc-500">
                 {combiner.matchs.length} matchs
               </span>
@@ -2978,8 +2989,8 @@ export default function Home() {
                     <ApiStatusRow
                       icon={DollarSign}
                       name="DraftKings Odds"
-                      status="ok"
-                      detail="Cotes synchronisées"
+                      status="loading"
+                      detail="Partiellement réelles (~62% estimées)"
                     />
                     <ApiStatusRow
                       icon={Layers}

@@ -167,28 +167,27 @@ function generateFormBasedCotes(homeForm: any, awayForm: any): any {
   let p2 = awayPts / totalStrength;
   let pN = 1 - p1 - p2;
 
+  // BUG FIX : moduler pN selon l'écart |p1-p2| au lieu de le forcer vers ~0.22.
+  // L'ancien clamp [0.20,0.35] + renomalisation écrasait pN ≈ 0.217 partout →
+  // cote_N = round(1/0.217 × 0.92) ≈ 4.60 uniforme sur tous les matchs form_based.
+  // Désormais : équipes équilibrées (petit écart) → nul élevé (~0.30) ;
+  // favori nettement plus fort (grand écart) → nul plus bas (~0.16-0.22).
+  const gap = Math.abs(p1 - p2);
+  let pNTarget = 0.30 - 0.14 * Math.min(1, gap / 0.40); // cible [0.16, 0.30]
+
   // Ajustement pN selon le total de buts attendus (peu de buts → plus de nuls).
-  if (totalGoalsAvg < 2.0) pN = Math.min(0.38, pN + 0.10);
-  else if (totalGoalsAvg > 3.0) pN = Math.max(0.20, pN - 0.05);
+  if (totalGoalsAvg < 2.0) pNTarget = Math.min(0.40, pNTarget + 0.06);
+  else if (totalGoalsAvg > 3.0) pNTarget = Math.max(0.14, pNTarget - 0.04);
 
-  // Clamp réaliste football : p1/p2 ∈ [0.15, 0.65], pN ∈ [0.20, 0.35]
-  p1 = Math.max(0.15, Math.min(0.65, p1));
-  p2 = Math.max(0.15, Math.min(0.65, p2));
-  pN = Math.max(0.20, Math.min(0.35, pN));
+  // Borne réaliste mais large : jamais détruire la variation du nul.
+  pNTarget = Math.max(0.14, Math.min(0.40, pNTarget));
 
-  // Renormalisation ET re-clamp pN (sécurité supplémentaire après division).
-  const total = p1 + pN + p2;
-  p1 /= total; pN /= total; p2 /= total;
-  // BUG #6 FIX (partiel) : re-clamp pN après normalisation pour garantir pN >= 0.20
-  if (pN < 0.20) {
-    const excess = 0.20 - pN;
-    pN = 0.20;
-    // On redistribue l'excédent proportionnellement sur p1 et p2
-    const sum = p1 + p2;
-    if (sum > 0) {
-      p1 -= excess * (p1 / sum);
-      p2 -= excess * (p2 / sum);
-    }
+  // On garde le ratio p1/(p1+p2) existant et on complète la masse à 1 avec pN.
+  const sumWin = p1 + p2;
+  pN = pNTarget;
+  if (sumWin > 0) {
+    p1 = (1 - pN) * (p1 / sumWin);
+    p2 = (1 - pN) * (p2 / sumWin);
   }
 
   const margin = 0.92;

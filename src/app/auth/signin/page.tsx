@@ -30,9 +30,9 @@ export default function SignInPage() {
         return;
       }
 
-      // Connexion réussie → route vers l'app.
-      const redirectTo = result?.url || '/';
-      router.push(redirectTo);
+      // Connexion réussie → forcer la redirection vers l'accueil
+      // (result?.url peut renvoyer '/auth/signin' avec redirect:false, on ignore).
+      router.push('/');
       router.refresh();
     } catch {
       setError('Erreur de réseau. Réessayez.');

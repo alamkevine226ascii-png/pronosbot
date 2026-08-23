@@ -888,30 +888,55 @@ async function buildResponseData(rangeStr: string, datesArray: string[]): Promis
   const allMatchs: any[] = [];
 
   // === API-FOOTBALL: vraies cotes multi-bookmakers (3 jours, free tier, cache 1h) ===
-  console.log('[matchs] Récupération cotes API-Football...');
-  const afOddsMap = await getApiFootballOdds();
-  console.log(`[matchs] API-Football: ${afOddsMap.size} matchs avec cotes multi-bookmakers`);
+  // BUG FIX : si un provider de cotes tierces throw (clé absente/expirée, panne API),
+  // ça ne doit PAS faire échouer toute la collecte ESPN → fallback sur Map vide,
+  // les matchs ESPN restent collectés (form-based odds en dernier recours).
+  let afOddsMap: Map<string, any>;
+  try {
+    console.log('[matchs] Récupération cotes API-Football...');
+    afOddsMap = await getApiFootballOdds();
+    console.log(`[matchs] API-Football: ${afOddsMap.size} matchs avec cotes multi-bookmakers`);
+  } catch (e) {
+    console.warn(`[matchs] API-Football indisponible (${e instanceof Error ? e.message : 'unknown'}) — collecte ESPN poursuivie avec cotes form-based`);
+    afOddsMap = new Map();
+  }
 
   // === FOOTBALL-DATA.ORG: cotes agrégées multi-bookmakers (cache 10 min) ===
-  console.log('[matchs] Récupération cotes Football-Data.org...');
-  const fdOddsMap = await getFootballDataOdds();
-  console.log(`[matchs] Football-Data: ${fdOddsMap.size} matchs avec cotes disponibles`);
+  let fdOddsMap: Map<string, any>;
+  try {
+    console.log('[matchs] Récupération cotes Football-Data.org...');
+    fdOddsMap = await getFootballDataOdds();
+    console.log(`[matchs] Football-Data: ${fdOddsMap.size} matchs avec cotes disponibles`);
+  } catch (e) {
+    console.warn(`[matchs] Football-Data org indisponible (${e instanceof Error ? e.message : 'unknown'}) — collecte ESPN poursuivie`);
+    fdOddsMap = new Map();
+  }
 
   // Compteurs de diagnostic: { ligue, eventsESPN, gardés, skippés }
   const stats: Array<{ ligue: string; eventsESPN: number; gardes: number; skipped: number }> = [];
 
   // 1 SEULE requête/ligue (plage 7 jours) — fetch parallel
   const fetchPromises: Promise<void>[] = [];
+  // Compteur de ligues où le fetch ESPN a échoué (HTTP non-OK / timeout / exception).
+  // Rendu visible dans le log de diagnostic : si fetchFailed === nb de ligues → count 0 expliqué.
+  let fetchFailed = 0;
 
   for (const [leagueId, leagueName] of Object.entries(LEAGUES)) {
     fetchPromises.push((async () => {
       try {
         const resp = await fetch(`${ESPN_BASE}/${leagueId}/scoreboard?dates=${rangeStr}`, { signal: AbortSignal.timeout(10000) });
         if (!resp.ok) {
-          // Log non-OK (404/400 = ID invalide, 403 = rate limité)
+          // BUG FIX : TOUTE erreur HTTP doit être visible dans les logs Vercel.
+          // Avant : seul 404/400 était loggé ; 429 (rate-limit) et 5xx (panne ESPN)
+          // étaient avalés silencieusement → count 0 sans aucune trace.
           if (resp.status === 404 || resp.status === 400) {
             console.warn(`[matchs] ESPN ${leagueId}: ID invalide (HTTP ${resp.status}) — à corriger dans LEAGUES`);
+          } else if (resp.status === 429 || resp.status === 403) {
+            console.warn(`[matchs] ESPN ${leagueId}: rate-limit (HTTP ${resp.status}) — matchs perdus pour cette ligue`);
+          } else {
+            console.warn(`[matchs] ESPN ${leagueId}: erreur HTTP ${resp.status} — matchs perdus pour cette ligue`);
           }
+          fetchFailed++;
           return;
         }
         const data = await resp.json();
@@ -1008,7 +1033,10 @@ async function buildResponseData(rangeStr: string, datesArray: string[]): Promis
         }
       } catch (e) {
         const msg = e instanceof Error ? e.message : 'unknown';
-        console.warn(`[matchs] ESPN ${leagueId}: ${msg}`);
+        // BUG FIX : rendre le timeout/échec réseau visible (avant : warning avalé sans contexte).
+        const isTimeout = e instanceof Error && e.name === 'TimeoutError';
+        console.warn(`[matchs] ESPN ${leagueId}: ${isTimeout ? 'TIMEOUT (>10s)' : 'échec réseau'} — ${msg}`);
+        fetchFailed++;
       }
     })());
   }
@@ -1021,8 +1049,11 @@ async function buildResponseData(rangeStr: string, datesArray: string[]): Promis
   const totalGardes = stats.reduce((s, x) => s + x.gardes, 0);
   const totalSkipped = stats.reduce((s, x) => s + x.skipped, 0);
   console.log(
-    `[matchs] Diagnostic: ESPN=${totalESPN} matchs | gardés=${totalGardes} | skippés=${totalSkipped} | ligues actives=${stats.length}/${Object.keys(LEAGUES).length}`
+    `[matchs] Diagnostic: ESPN=${totalESPN} matchs | gardés=${totalGardes} | skippés=${totalSkipped} | ligues actives=${stats.length}/${Object.keys(LEAGUES).length} | fetchs ESPN échoués=${fetchFailed}/${Object.keys(LEAGUES).length}`
   );
+  if (fetchFailed > 0) {
+    console.warn(`[matchs] ${fetchFailed} ligue(s) ESPN en échec — si toutes échouent, count=0 (source indisponible/rate-limit) mais le cache N'EST PAS empoisonné.`);
+  }
   for (const s of stats) {
     if (s.skipped > 0 || s.eventsESPN !== s.gardes) {
       console.warn(`[matchs] ${s.ligue}: ESPN=${s.eventsESPN} gardés=${s.gardes} skippés=${s.skipped}`);
@@ -1061,6 +1092,21 @@ const CACHE_REDIS_PREFIX = 'matchs:resp:'; // Redis key namespace for this respo
 const CACHE_REDIS_TTL = Math.floor(STALE_TTL / 1000); // 1h, same as STALE_TTL
 
 function setCache(key: string, data: any): void {
+  // BUG FIX (cause racine) : ne JAMAIS cacher une réponse VIDE.
+  // Si ESPN/APIs ont échoué (rate-limit 429, timeout, panne 5xx) et qu'on construit un
+  // payload à 0 matchs, le cacher empoisonne Redis + mémoire LRU pendant jusqu'à
+  // STALE_TTL (1h) : chaque requête servirait ce 0 sans jamais retenter le fetch vers
+  // ESPN (le 0 se ré-empoisonne lui-même via le refetch en arrière-plan). Refuser ici
+  // force le prochain appel à refaire un vrai fetch → auto-guérison après une panne.
+  const matchCount = Array.isArray(data?.matchs) ? data.matchs.length : -1;
+  if (matchCount === 0) {
+    console.error(`[matchs] REFUS de mettre en cache une réponse vide (count=0, key=${key}) — cache non empoisonné, prochain appel re-fetchera ESPN.`);
+    return;
+  }
+  if (matchCount < 0) {
+    console.warn(`[matchs] setCache: payload inattendu (champ "matchs" absent) — refus (key=${key})`);
+    return;
+  }
   // Write-through to Redis (async, best-effort — cold starts d'autres instances la verront).
   if (isRedisEnabled) {
     void cacheSet(`${CACHE_REDIS_PREFIX}${key}`, { data, timestamp: Date.now() }, CACHE_REDIS_TTL)
@@ -1142,12 +1188,20 @@ export async function GET(request: NextRequest) {
       const redisEntry = await cacheGetRaw(`${CACHE_REDIS_PREFIX}${cacheKey}`);
       if (redisEntry && typeof redisEntry === 'object' && 'data' in (redisEntry as any)) {
         const entry = redisEntry as CacheEntry;
-        // Hydrate memory so subsequent requests serve instant.
-        apiCache.set(cacheKey, { data: entry.data, timestamp: entry.timestamp ?? Date.now() });
-        if (Date.now() - (entry.timestamp ?? 0) < STALE_TTL) {
-          return NextResponse.json(entry.data, {
-            headers: { 'X-Cache': 'REDIS', ...CACHE_HEADERS },
-          });
+        // BUG FIX : ne pas hydrater/servir une entrée Redis VIDE (causée par un fetch
+        // échoué qui a été caché avant le correctif ci-dessus). Un 0 empoisonné ne doit
+        // pas ressortir du cold-start : on ignore et on re-fetche (X-Cache: MISS).
+        const redisN = Array.isArray((entry.data as any)?.matchs) ? (entry.data as any).matchs.length : -1;
+        if (redisN === 0) {
+          console.warn(`[matchs] Entrée Redis VIDE (count=0) ignorée pour key=${cacheKey} — re-fetch ESPN.`);
+        } else {
+          // Hydrate memory so subsequent requests serve instant.
+          apiCache.set(cacheKey, { data: entry.data, timestamp: entry.timestamp ?? Date.now() });
+          if (Date.now() - (entry.timestamp ?? 0) < STALE_TTL) {
+            return NextResponse.json(entry.data, {
+              headers: { 'X-Cache': 'REDIS', ...CACHE_HEADERS },
+            });
+          }
         }
       }
     } catch (e) {

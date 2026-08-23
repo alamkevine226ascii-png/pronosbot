@@ -1,6 +1,6 @@
 import type { Metadata, Viewport } from "next";
 import { Inter, Geist_Mono } from "next/font/google";
-import { SessionProvider } from "next-auth/react";
+import AuthProvider from "@/components/auth-provider";
 import "./globals.css";
 import { Toaster as SonnerToaster } from "@/components/ui/sonner";
 import { ServiceWorkerRegister } from "@/components/sw-register";
@@ -71,8 +71,8 @@ export default function RootLayout({ children }: Readonly<{ children: React.Reac
         suppressHydrationWarning
         className={`${inter.variable} ${geistMono.variable} antialiased bg-background text-foreground`}
       >
-        {/* SessionProvider fournit la session NextAuth à toute l'app (connexion obligatoire). */}
-        <SessionProvider>
+        {/* AuthProvider fournit la session NextAuth à toute l'app (connexion obligatoire). */}
+        <AuthProvider>
           {children}
           {/* Sonner Toaster — mounted so that `toast.success(...)` calls from
               page.tsx (import { toast } from 'sonner') actually render. */}
@@ -95,7 +95,7 @@ export default function RootLayout({ children }: Readonly<{ children: React.Reac
               testability. The component renders null on the server and only
               runs the registration effect in production. */}
           <ServiceWorkerRegister />
-        </SessionProvider>
+        </AuthProvider>
       </body>
     </html>
   );

@@ -45,11 +45,16 @@ async function checkWebSearchRateLimit(ip: string): Promise<{ allowed: boolean; 
 }
 
 function setCache(key: string, data: any): void {
+  // BUG-19 FIX : vrai LRU. Map conserve l'ordre d'INSERTION, donc pour maintenir
+  // l'ordre d'accès il faut delete + re-set (déplace la clé en fin). On évince AUSSI
+  // avant d'insérer pour ne jamais dépasser le cap sous concurrence (avant : check
+  // après set → pic à MAX+1, et éviction = première insertion = FIFO, pas LRU).
+  cache.delete(key);
   cache.set(key, { data, timestamp: Date.now() });
-  // LRU eviction: Map preserves insertion order, oldest first.
-  if (cache.size > CACHE_MAX_ENTRIES) {
+  while (cache.size > CACHE_MAX_ENTRIES) {
     const oldestKey = cache.keys().next().value;
-    if (oldestKey) cache.delete(oldestKey);
+    if (oldestKey === undefined) break;
+    cache.delete(oldestKey);
   }
 }
 
@@ -596,6 +601,9 @@ export async function POST(request: NextRequest) {
     const cacheKey = `${home}|${away}|${competition || ''}|${oddsSource || ''}|${hasValidBasePronostic ? 'adj' : 'noadj'}`;
     const cached = cache.get(cacheKey);
     if (cached && Date.now() - cached.timestamp < CACHE_TTL) {
+      // BUG-19 FIX : touch LRU à la lecture (déplace la clé en fin d'ordre d'insertion).
+      cache.delete(cacheKey);
+      cache.set(cacheKey, cached);
       return NextResponse.json(cached.data, {
         headers: { 'X-Cache': 'HIT' },
       });

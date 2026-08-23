@@ -285,9 +285,15 @@ interface RiskInfo {
 }
 
 function getRiskInfo(proba: number): RiskInfo {
+  // BUG FIX: quantification arrondie au palier de 5% AVANT classification.
+  // Avant, deux probas quasi identiques (ex: BTTS Oui 49.9% et Non 50.1%) pouvaient
+  // être affichées 50% / 50% mais classées "Élevé" vs "Moyen" parce que le seuil interne
+  // à 0.50 basculait. On arrondit au pas de 0.05 pour que l'étiquette reste cohérente
+  // avec la valeur affichée (formatPct arrondit au % près).
+  const p = Math.round(proba * 20) / 20;
   // Low risk (proba ≥ 70%) = green — universal UX (safe = green).
   // Medium risk (50-70%) = amber. High risk (<50%) = red.
-  if (proba >= 0.7) {
+  if (p >= 0.7) {
     return {
       level: 'low',
       label: 'Faible risque',
@@ -299,7 +305,7 @@ function getRiskInfo(proba: number): RiskInfo {
       borderClass: 'border-[#00FF00]/40',
     };
   }
-  if (proba >= 0.5) {
+  if (p >= 0.5) {
     return {
       level: 'medium',
       label: 'Risque moyen',
@@ -321,6 +327,28 @@ function getRiskInfo(proba: number): RiskInfo {
     bgClass: 'bg-red-500/15',
     borderClass: 'border-red-500/40',
   };
+}
+
+/* ---------------------------------------------------------------
+ * QUALITÉ / VALUE D'UN PARI — basée sur l'EV (écart proba vs cote marché).
+ *   EV = (Probabilité algo) × Cote - 1
+ *   - EV ≥ +5%  → « Oui » (vraie value : notre proba dépasse nettement la cote)
+ *   - EV entre -2% et +5% → « Standard » (bull cohérent)
+ *   - EV ≤ -2%  → « Non » (mauvaise value : cote plus basse que le juste prix)
+ * C'est LA formule couplée à l'EV que tu demandais — fin du badge en dur.
+ * --------------------------------------------------------------- */
+type ValueQuality = { key: 'oui' | 'standard' | 'non'; label: string; short: string; className: string };
+function getValueQuality(ev: number): ValueQuality {
+  if (ev >= 0.05) {
+    return { key: 'oui', label: 'Bonne value', short: 'Oui',
+      className: 'text-[#00FF00]' };
+  }
+  if (ev <= -0.02) {
+    return { key: 'non', label: 'Pas de value', short: 'Non',
+      className: 'text-red-400' };
+  }
+  return { key: 'standard', label: 'Valeur standard', short: 'Standard',
+    className: 'text-zinc-400' };
 }
 
 /* ---- Bet type color coding ---- */
@@ -1016,6 +1044,7 @@ function ProbRing({
  * ========================================================================= */
 function BestBetCard({ pari }: { pari: Pari }) {
   const risk = getRiskInfo(pari.probabilite);
+  const value = getValueQuality(pari.ev ?? 0);
   const betStyle = getBetTypeStyle(pari.type);
 
   return (
@@ -1106,17 +1135,14 @@ function BestBetCard({ pari }: { pari: Pari }) {
               </span>
             </div>
 
-            {/* Confiance — remplace l'EV sur la carte Meilleur pari. Le badge "Meilleur pari" indique deja que c... */}
+            {/* Confiance — basée sur l'EV réel du pari (fin du badge "Maximale" en dur). */}
             <div className="flex min-w-0 flex-col items-center gap-1 text-center">
               <span className="text-[9px] font-bold uppercase tracking-widest text-amber-300/80">
                 Confiance
               </span>
-              <span
-                className="inline-flex items-center gap-1 rounded-full border border-amber-400/40 bg-amber-400/15 px-2 py-1 text-[10px] font-black uppercase tracking-wide text-amber-300"
-                style={{ textShadow: 'none' }}
-              >
+              <span className={`inline-flex items-center gap-1 rounded-full border border-amber-400/40 bg-amber-400/15 px-2 py-1 text-[10px] font-black uppercase tracking-wide ${value.className}`} style={{ textShadow: 'none' }}>
                 <Crown className="h-3 w-3" />
-                Maximale
+                {value.short}
               </span>
             </div>
           </div>
@@ -1144,11 +1170,10 @@ function BestBetCard({ pari }: { pari: Pari }) {
 function AllBetsCard({ pari, isBest }: { pari: Pari; isBest?: boolean }) {
   const ev = pari.ev ?? 0;
   const risk = getRiskInfo(pari.probabilite);
+  const value = getValueQuality(ev);
   const style = getBetTypeStyle(pari.type);
   const probaPct = Math.max(2, Math.min(100, pari.probabilite * 100));
 
-  // EV display: on the "best" card we hide the EV (can be negative) and show
-  // a crown icon instead. On normal cards we show EV with trend icon.
   const evColor = ev > 0 ? 'text-[#00FF00]' : ev < 0 ? 'text-red-400' : 'text-zinc-400';
   const EvIcon = ev > 0 ? TrendingUp : ev < 0 ? TrendingDown : Minus;
 
@@ -1228,22 +1253,26 @@ function AllBetsCard({ pari, isBest }: { pari: Pari; isBest?: boolean }) {
                 {formatPct(pari.probabilite)}
               </p>
             </div>
-            {/* Value ou Confiance — affichage épuré sans EV négatif (effet repoussoir). Le badge de Risque (Moye... */}
+            {/* Value ou Confiance — fondé sur l'EV réel (getValueQuality). */}
             <div className="rounded-md border border-[#2A2A2A] bg-[#1A1A1A]/60 px-2 py-1.5">
               <p className="text-[9px] font-bold uppercase tracking-wide text-zinc-600">
                 {isBest ? 'Confiance' : 'Value'}
               </p>
               {isBest ? (
                 <p className="flex items-center gap-0.5 text-sm font-black text-amber-400">
-                  <Crown className="h-3 w-3" /> Max
+                  <Crown className="h-3 w-3" /> {value.short}
                 </p>
-              ) : ev > 0 ? (
-                <p className="flex items-center gap-0.5 text-sm font-bold text-[#00FF00]">
-                  <TrendingUp className="h-3 w-3" /> Oui
+              ) : value.key === 'oui' ? (
+                <p className={`flex items-center gap-0.5 text-sm font-bold ${value.className}`}>
+                  <TrendingUp className="h-3 w-3" /> {value.short}
+                </p>
+              ) : value.key === 'non' ? (
+                <p className={`flex items-center gap-0.5 text-sm font-bold ${value.className}`}>
+                  <TrendingDown className="h-3 w-3" /> {value.short}
                 </p>
               ) : (
                 <p className="flex items-center gap-0.5 text-sm font-bold text-zinc-400">
-                  <Minus className="h-3 w-3" /> Standard
+                  <Minus className="h-3 w-3" /> {value.short}
                 </p>
               )}
             </div>
@@ -1438,19 +1467,16 @@ function CombinerCard({ combiner }: { combiner: Combiner }) {
               <div className="flex items-center gap-1 text-[9px] font-bold uppercase tracking-wide text-zinc-500">
                 <TrendingUp className="h-3 w-3" /> Value
               </div>
-              {/* Affichage épuré: EV positive → "Oui" (doré), EV négative → "Standard" (gris). Évite l'effet repou... */}
-              <p
-                className={`mt-1 flex items-center gap-0.5 text-base font-bold ${
-                  ev > 0 ? 'text-[#00FF00]' : 'text-zinc-400'
-                }`}
-              >
-                {ev > 0 ? (
-                  <TrendingUp className="h-3 w-3" />
-                ) : (
-                  <Minus className="h-3 w-3" />
-                )}
-                {ev > 0 ? 'Oui' : 'Standard'}
-              </p>
+              {/* Value — fondée sur l'EV réel (getValueQuality). */}
+              {(() => {
+                const v = getValueQuality(ev);
+                const Icon = v.key === 'oui' ? TrendingUp : v.key === 'non' ? TrendingDown : Minus;
+                return (
+                  <p className={`mt-1 flex items-center gap-0.5 text-base font-bold ${v.className}`}>
+                    <Icon className="h-3 w-3" /> {v.short}
+                  </p>
+                );
+              })()}
             </div>
             <div className="rounded-lg border border-[#2A2A2A] bg-[#222222]/30 p-2.5">
               <div className="flex items-center gap-1 text-[9px] font-bold uppercase tracking-wide text-zinc-500">

@@ -1,7 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { getFootballDataOdds, findFootballDataOdds } from './football-data';
 import { getApiFootballOdds, findApiFootballOdds } from './api-football';
-import { rateLimitCheck } from '@/lib/redis';
+import { rateLimitCheck, cacheSet, cacheGetRaw, isRedisEnabled } from '@/lib/redis';
 
 const ESPN_BASE = 'https://site.api.espn.com/apis/site/v2/sports/soccer';
 
@@ -232,6 +232,12 @@ async function getTeamForm(teamId: string, compId: string): Promise<any> {
   const cacheKey = `${compId}:${teamId}`;
   const cached = formCache.get(cacheKey);
   if (cached && Date.now() - cached.timestamp < FORM_CACHE_TTL) {
+    // BUG-19 FIX : vrai LRU — Map garde l'ordre d'insertion, donc on re-touche la clé
+    // accédée pour la déplacer en fin d'ordre (les plus récemment utilisés survivent).
+    // Avant : `formCache.keys().next()` retirait la PLUS ANCIENNE insertion (FIFO),
+    // pas la moins utilisée — sous-optimal quand des équipes chaudes sont accédées en boucle.
+    formCache.delete(cacheKey);
+    formCache.set(cacheKey, cached);
     return cached.form;
   }
 
@@ -397,8 +403,11 @@ function generatePronostic(match: any): any {
     'eng.fa': 1.40, 'eng.league_cup': 1.40, 'jpn.1': 1.40,
   };
   const leagueAvgXG = LEAGUE_XG[match.competition_id] || 1.35;
-  const formHomeXG = (hf.buts_marques_moy || leagueAvgXG) * 0.7 + (af.buts_encaisses_moy || leagueAvgXG * 0.85) * 0.3;
-  const formAwayXG = (af.buts_marques_moy || leagueAvgXG) * 0.7 + (hf.buts_encaisses_moy || leagueAvgXG * 0.85) * 0.3;
+  // BUG FIX: utiliser `??` (nullish) au lieu de `||`. Un 0.00 (équipe qui ne marque
+  // jamais / défense qui n'encaisse rien) est une VRAIE info, pas une donnée manquante.
+  // Avec `||`, une moyenne de 0 était remplacée par la moyenne de ligue → xG pénalisé artificiellement.
+  const formHomeXG = (hf.buts_marques_moy ?? leagueAvgXG) * 0.7 + (af.buts_encaisses_moy ?? leagueAvgXG * 0.85) * 0.3;
+  const formAwayXG = (af.buts_marques_moy ?? leagueAvgXG) * 0.7 + (hf.buts_encaisses_moy ?? leagueAvgXG * 0.85) * 0.3;
   const cotesHomeXG = leagueAvgXG * (1 + Math.max(-0.4, Math.min(1.2, (p1 - 0.33) * 2.5)));
   const cotesAwayXG = leagueAvgXG * (1 + Math.max(-0.4, Math.min(1.2, (p2 - 0.33) * 2.5)));
   const homeXG = Math.max(0.4, Math.min(3.5, formHomeXG * 0.40 + cotesHomeXG * 0.50 + leagueAvgXG * 0.10));
@@ -835,20 +844,20 @@ function validateDate(raw: string | null): string | null {
 
 /**
  * Build the date range string for the ESPN API.
- * When week=true, returns a 21-day range (today → +21 days) formatted as
+ * When week=true, returns a 7-day range (today → +7 days) formatted as
  * 'YYYYMMDD-YYYYMMDD' so ESPN returns all matches in a SINGLE request per league.
  * This is far more efficient than one request per day (was 7 req/league → now 1).
  * When week is falsy, returns a single day 'YYYYMMDD'.
  *
  * Returns { rangeStr, datesArray } where:
- * - rangeStr is passed to ESPN (e.g. '20260708-20260728')
+ * - rangeStr is passed to ESPN (e.g. '20260708-20260715')
  * - datesArray is the list of individual day strings for the UI DayTabs
  */
 function buildDateRange(weekParam: string | null, dateStr: string): { rangeStr: string; datesArray: string[] } {
   if (weekParam) {
     const today = new Date();
     const end = new Date(today);
-    end.setDate(end.getDate() + 7); // 7 jours — plage standard
+    end.setDate(end.getDate() + 7); // 7 jours — plage standard (corrigé : le commentaire disait « 21 jours »)
     const fmt = (d: Date) => {
       const y = d.getFullYear();
       const m = String(d.getMonth() + 1).padStart(2, '0');
@@ -969,7 +978,7 @@ async function buildResponseData(rangeStr: string, datesArray: string[]): Promis
               if (fdResult) {
                 cotes = {
                   ...fdResult.cotes,
-                  estimated: true,
+                  estimated: false, // BUG FIX #34: Football-Data agrège de VRAIES cotes (11 bookmakers).
                   source: 'football_data',
                 };
                 oddsSource = 'football_data';
@@ -1044,12 +1053,34 @@ async function buildResponseData(rangeStr: string, datesArray: string[]): Promis
   };
 }
 
-// In-memory cache with simple LRU eviction (Map preserves insertion order).
+// Cache : in-memory LRU (fast path) + write-through/read-through Redis (cold-start resilience).
+// Avant : cache purement in-memory → à chaque cold-start Vercel (go dormant), le cache était
+// vidé et le PREMIER utilisateur déclenchait ~45 requêtes HTTP parallèles → timeout sur le
+// plan gratuit (10s). Maintenant le cache est persisté dans Redis (si UPSTASH_REDIS_* est
+// configuré) et rechargé au démarrage : un cold start sert l'état précédent instantanément,
+// puis refraîchit en arrière-plan.
+interface CacheEntry { data: any; timestamp: number; refetching?: boolean; storedRedis?: boolean; }
+const apiCache = new Map<string, CacheEntry>();
+const CACHE_TTL = 300_000;     // 5 min  — fresh cache served immediately
+const STALE_TTL = 3_600_000;   // 1 h    — stale cache served + background refetch
+const CACHE_MAX_ENTRIES = 50;  // LRU eviction limit (prevents memory leaks in prod)
+const CACHE_REDIS_PREFIX = 'matchs:resp:'; // Redis key namespace for this response cache
+const CACHE_REDIS_TTL = Math.floor(STALE_TTL / 1000); // 1h, same as STALE_TTL
+
 function setCache(key: string, data: any): void {
+  // Write-through to Redis (async, best-effort — cold starts d'autres instances la verront).
+  if (isRedisEnabled) {
+    void cacheSet(`${CACHE_REDIS_PREFIX}${key}`, { data, timestamp: Date.now() }, CACHE_REDIS_TTL)
+      .catch(() => {/* in-memory remains authoritative */});
+  }
+  // In-memory write (BUG-19 FIX : prune avant insert → jamais au-delà du cap sous concurrence,
+  // et delete avant insert → vrai LRU, pas FIFO).
+  apiCache.delete(key); // move existing key to the end (Map = insertion-order) → true LRU
   apiCache.set(key, { data, timestamp: Date.now() });
-  if (apiCache.size > CACHE_MAX_ENTRIES) {
-    const oldestKey = apiCache.keys().next().value;
-    if (oldestKey) apiCache.delete(oldestKey);
+  while (apiCache.size > CACHE_MAX_ENTRIES) {
+    const oldest = apiCache.keys().next().value;
+    if (oldest === undefined) break;
+    apiCache.delete(oldest);
   }
 }
 
@@ -1078,6 +1109,12 @@ export async function GET(request: NextRequest) {
 
   // 1) Fresh cache (< 5 min): return immediately.
   if (cached && now - cached.timestamp < CACHE_TTL) {
+    // BUG-19 FIX : touch LRU à la lecture.
+    if (apiCache.has(cacheKey)) {
+      const v = apiCache.get(cacheKey)!;
+      apiCache.delete(cacheKey);
+      apiCache.set(cacheKey, v);
+    }
     return NextResponse.json(cached.data, {
       headers: { 'X-Cache': 'HIT', ...CACHE_HEADERS },
     });
@@ -1102,7 +1139,26 @@ export async function GET(request: NextRequest) {
     });
   }
 
-  // 3) Cold / expired cache (> 1 h): blocking fetch.
+  // 3) Cold / expired cache (> 1 h): try Redis cache first (cold-start resilience).
+  if (!cached) {
+    try {
+      const redisEntry = await cacheGetRaw(`${CACHE_REDIS_PREFIX}${cacheKey}`);
+      if (redisEntry && typeof redisEntry === 'object' && 'data' in (redisEntry as any)) {
+        const entry = redisEntry as CacheEntry;
+        // Hydrate memory so subsequent requests serve instant.
+        apiCache.set(cacheKey, { data: entry.data, timestamp: entry.timestamp ?? Date.now() });
+        if (Date.now() - (entry.timestamp ?? 0) < STALE_TTL) {
+          return NextResponse.json(entry.data, {
+            headers: { 'X-Cache': 'REDIS', ...CACHE_HEADERS },
+          });
+        }
+      }
+    } catch (e) {
+      console.warn('[matchs] Redis read-through échoué:', e instanceof Error ? e.message : 'unknown');
+    }
+  }
+
+  // 4) Really cold: blocking fetch.
   const { rangeStr, datesArray } = buildDateRange(weekParam, dateStr);
   const responseData = await buildResponseData(rangeStr, datesArray);
   setCache(cacheKey, responseData);

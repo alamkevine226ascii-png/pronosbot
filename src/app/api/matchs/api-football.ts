@@ -223,11 +223,27 @@ export async function findApiFootballOdds(
   if (match) {
     return { cotes: match.cotes, bookmakerCount: match.bookmakerCount };
   }
-  // Fuzzy matching
+  // Fuzzy matching — BUG-20 FIX : on compare les COTÉS (home vs away) et non un simple
+  // `substring includes`. L'ancien code matchait un mauvais fixture dès qu'une chaîne
+  // contenait un morceau du nom (ex: "Man City" vs "City"). On exige maintenant que le
+  // HOME du maplé soit dans le home demandé ET l'AWAY dans l'away demandé, avec une
+  // longueur minimale pour éviter les faux positifs trop courts.
   const normHome = normalizeTeamName(homeName);
   const normAway = normalizeTeamName(awayName);
+  if (!normHome || !normAway) return null;
+
   for (const [mapKey, mapMatch] of afMap) {
-    if (mapKey.includes(normHome) && mapKey.includes(normAway)) {
+    // mapKey format: "home-away". Split on the role boundary.
+    const sep = mapKey.indexOf('-');
+    if (sep <= 0 || sep === mapKey.length - 1) continue;
+    const mapHome = mapKey.slice(0, sep);
+    const mapAway = mapKey.slice(sep + 1);
+    const homeOk = mapHome.length >= 3 && normHome.includes(mapHome);
+    const awayOk = mapAway.length >= 3 && normAway.includes(mapAway);
+    // Also try the reverse role order (some providers swap home/away).
+    const homeOkInv = mapHome.length >= 3 && normAway.includes(mapHome);
+    const awayOkInv = mapAway.length >= 3 && normHome.includes(mapAway);
+    if ((homeOk && awayOk) || (homeOkInv && awayOkInv)) {
       return { cotes: mapMatch.cotes, bookmakerCount: mapMatch.bookmakerCount };
     }
   }

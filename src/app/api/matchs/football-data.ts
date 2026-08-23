@@ -165,10 +165,21 @@ export async function findFootballDataOdds(
   if (match) {
     return { cotes: match.cotes, bookmakerCount: match.bookmakerCount };
   }
+  // Fuzzy matching — BUG-20 FIX : même logique role-safé qu'api-football.
   const normHome = normalizeTeamName(homeName);
   const normAway = normalizeTeamName(awayName);
+  if (!normHome || !normAway) return null;
+
   for (const [mapKey, mapMatch] of fdMap) {
-    if (mapKey.includes(normHome) && mapKey.includes(normAway)) {
+    const sep = mapKey.indexOf('-');
+    if (sep <= 0 || sep === mapKey.length - 1) continue;
+    const mapHome = mapKey.slice(0, sep);
+    const mapAway = mapKey.slice(sep + 1);
+    const homeOk = mapHome.length >= 3 && normHome.includes(mapHome);
+    const awayOk = mapAway.length >= 3 && normAway.includes(mapAway);
+    const homeOkInv = mapHome.length >= 3 && normAway.includes(mapHome);
+    const awayOkInv = mapAway.length >= 3 && normHome.includes(mapAway);
+    if ((homeOk && awayOk) || (homeOkInv && awayOkInv)) {
       return { cotes: mapMatch.cotes, bookmakerCount: mapMatch.bookmakerCount };
     }
   }

@@ -2,9 +2,8 @@
 
 import { useState, FormEvent } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
-import { Lock, ArrowRight, AlertCircle } from 'lucide-react';
+import { Lock, ArrowRight, AlertCircle, Loader2 } from 'lucide-react';
 
-const ACCESS_CODE = '230409';
 const STORAGE_KEY = 'pronobot_access_granted';
 
 interface AccessGateProps {
@@ -14,7 +13,9 @@ interface AccessGateProps {
 export function AccessGate({ children }: AccessGateProps) {
   const [code, setCode] = useState('');
   const [error, setError] = useState(false);
+  const [rateLimited, setRateLimited] = useState(false);
   const [attempts, setAttempts] = useState(0);
+  const [checking, setChecking] = useState(false);
 
   // Check localStorage on mount — avoids flash of login screen
   // Lazy initializer avoids the react-hooks/set-state-in-effect lint rule
@@ -27,21 +28,47 @@ export function AccessGate({ children }: AccessGateProps) {
     }
   });
 
-  const handleSubmit = (e: FormEvent) => {
+  const handleSubmit = async (e: FormEvent) => {
     e.preventDefault();
-    if (code.trim() === ACCESS_CODE) {
-      setGranted(true);
-      try {
-        localStorage.setItem(STORAGE_KEY, 'true');
-      } catch {
-        // localStorage blocked — session only
+    setChecking(true);
+    setError(false);
+    try {
+      // Validation SÉCURISÉE : le code est vérifié côté serveur (/api/access),
+      // plus jamais en clair dans le bundle front.
+      const resp = await fetch('/api/access', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ code: code.trim() }),
+      });
+      const data = await resp.json().catch(() => ({ allowed: false }));
+      if (resp.ok && data.allowed) {
+        setGranted(true);
+        try {
+          localStorage.setItem(STORAGE_KEY, 'true');
+        } catch {
+          // localStorage bloqué — session seulement
+        }
+      } else {
+        // 401 = code faux, 429 = trop de tentatives.
+        setError(true);
+        setAttempts((a) => a + 1);
+        setCode('');
+        if (resp.status === 429) {
+          setRateLimited(true);
+          // Backoff : on garde l'erreur visible plus longtemps (2s → 8s).
+          setTimeout(() => { setError(false); setRateLimited(false); }, 8000);
+        } else {
+          setTimeout(() => setError(false), 2000);
+        }
       }
-    } else {
+    } catch {
+      // Erreur réseau / serveur — message générique.
       setError(true);
       setAttempts((a) => a + 1);
       setCode('');
-      // Clear error after 2s
-      setTimeout(() => setError(false), 2000);
+      setTimeout(() => setError(false), 3000);
+    } finally {
+      setChecking(false);
     }
   };
 
@@ -108,6 +135,7 @@ export function AccessGate({ children }: AccessGateProps) {
               onChange={(e) => {
                 setCode(e.target.value);
                 setError(false);
+                setRateLimited(false);
               }}
               placeholder="• • • • • •"
               maxLength={6}
@@ -132,7 +160,9 @@ export function AccessGate({ children }: AccessGateProps) {
                   className="absolute -bottom-7 left-0 right-0 flex items-center justify-center gap-1.5 text-xs font-bold text-red-400"
                 >
                   <AlertCircle className="h-3.5 w-3.5" />
-                  {attempts >= 3
+                  {rateLimited
+                    ? 'Trop de tentatives — attendez quelques secondes'
+                    : attempts >= 3
                     ? 'Code incorrect — Accès refusé'
                     : 'Code incorrect — Réessayez'}
                 </motion.div>
@@ -142,12 +172,21 @@ export function AccessGate({ children }: AccessGateProps) {
 
           <button
             type="submit"
-            disabled={code.length < 4}
+            disabled={code.length < 4 || checking}
             className="group flex w-full items-center justify-center gap-2 rounded-xl bg-[#00FF00] py-4 text-sm font-black uppercase tracking-wider text-black transition-all hover:bg-[#00CC00] disabled:cursor-not-allowed disabled:bg-[#333333] disabled:text-zinc-600"
-            style={code.length >= 4 ? { boxShadow: '0 0 20px rgba(0,255,0,0.4)' } : undefined}
+            style={code.length >= 4 && !checking ? { boxShadow: '0 0 20px rgba(0,255,0,0.4)' } : undefined}
           >
-            Accéder à l'app
-            <ArrowRight className="h-4 w-4 transition-transform group-hover:translate-x-1" />
+            {checking ? (
+              <>
+                <Loader2 className="h-4 w-4 animate-spin" />
+                Vérification...
+              </>
+            ) : (
+              <>
+                Accéder à l'app
+                <ArrowRight className="h-4 w-4 transition-transform group-hover:translate-x-1" />
+              </>
+            )}
           </button>
         </form>
 

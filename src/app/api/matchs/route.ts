@@ -810,14 +810,7 @@ function generateCombiners(matchs: any[]): any[] {
   return combiners.slice(0, 6);
 }
 
-// === CACHE + RATE LIMITING === (SWR: 5min fresh, 1h stale + bg refetch)
-interface CacheEntry { data: any; timestamp: number; refetching?: boolean; }
-const apiCache = new Map<string, CacheEntry>();
-const CACHE_TTL = 300_000;     // 5 min  — fresh cache served immediately
-const STALE_TTL = 3_600_000;   // 1 h    — stale cache served + background refetch
-const CACHE_MAX_ENTRIES = 50;  // LRU eviction limit (prevents memory leaks in prod)
-
-// Rate limiting — délégué à src/lib/redis.ts (Redis si configuré, in-memory sinon)
+// === RATE LIMITING === (le cache global est défini plus bas avec l'ajout Redis)
 const RATE_LIMIT_MAX = 10; // 10 requetes par minute par IP
 
 function getClientIP(request: NextRequest): string {

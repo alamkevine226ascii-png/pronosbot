@@ -22,6 +22,9 @@ model User {
   id        String   @id @default(cuid())
   email     String   @unique
   name      String?
+  // Mot de passe HACHÉ (bcrypt) — JAMAIS stocké en clair.
+  // Ajouté pour l'authentification par compte (NextAuth CredentialsProvider).
+  passwordHash String?
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
   // Relation inverse vers les paris de cet utilisateur (UserBet).

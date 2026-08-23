@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from 'next/server';
 import { getFootballDataOdds, findFootballDataOdds } from './football-data';
 import { getApiFootballOdds, findApiFootballOdds } from './api-football';
 import { rateLimitCheck, cacheSet, cacheGetRaw, isRedisEnabled } from '@/lib/redis';
+import { requireAuth } from '@/lib/auth-guard';
 
 const ESPN_BASE = 'https://site.api.espn.com/apis/site/v2/sports/soccer';
 
@@ -1078,6 +1079,10 @@ function setCache(key: string, data: any): void {
 }
 
 export async function GET(request: NextRequest) {
+  // === AUTHENTIFICATION (obligatoire) : se connecter d'abord ===
+  const auth = await requireAuth();
+  if (!auth.ok) return auth.response;
+
   // === RATE LIMITING ===
   const clientIP = getClientIP(request);
   const rateLimitResult = await checkRateLimit(clientIP);

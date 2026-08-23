@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server';
 import ZAI from 'z-ai-web-dev-sdk';
 import { rateLimitCheck } from '@/lib/redis';
+import { requireAuth } from '@/lib/auth-guard';
 
 // ────────────────────────────────────────────────────────────────────────────
 // /api/web-search
@@ -552,6 +553,10 @@ function computeAdjustedPronostic(
 }
 
 export async function POST(request: NextRequest) {
+  // === AUTHENTIFICATION (obligatoire) : se connecter d'abord ===
+  const auth = await requireAuth();
+  if (!auth.ok) return auth.response;
+
   // === RATE LIMITING (stricter — LLM costs real money) ===
   const clientIP = getClientIP(request);
   const rateLimitResult = await checkWebSearchRateLimit(clientIP);

@@ -1,83 +1,39 @@
 'use client';
 
-import { useState, FormEvent } from 'react';
-import { motion, AnimatePresence } from 'framer-motion';
-import { Lock, ArrowRight, AlertCircle, Loader2 } from 'lucide-react';
-
-const STORAGE_KEY = 'pronobot_access_granted';
+import { useSession } from 'next-auth/react';
+import { useRouter } from 'next/navigation';
+import { motion } from 'framer-motion';
+import { Lock, LogIn, UserPlus } from 'lucide-react';
 
 interface AccessGateProps {
   children: React.ReactNode;
 }
 
+/**
+ * Garde d'accès — exige une CONNEXION (session NextAuth).
+ * Aucun code en clair, aucun stockage local : l'accès dépend uniquement
+ * de la session serveur sécurisée. Si l'utilisateur n'est pas connecté,
+ * on affiche un écran avec deux actions : Se connecter / Créer un compte.
+ */
 export function AccessGate({ children }: AccessGateProps) {
-  const [code, setCode] = useState('');
-  const [error, setError] = useState(false);
-  const [rateLimited, setRateLimited] = useState(false);
-  const [attempts, setAttempts] = useState(0);
-  const [checking, setChecking] = useState(false);
+  const { data: session, status } = useSession();
+  const router = useRouter();
 
-  // Check localStorage on mount — avoids flash of login screen
-  // Lazy initializer avoids the react-hooks/set-state-in-effect lint rule
-  const [granted, setGranted] = useState(() => {
-    if (typeof window === 'undefined') return false;
-    try {
-      return localStorage.getItem(STORAGE_KEY) === 'true';
-    } catch {
-      return false;
-    }
-  });
+  // Session en cours de chargement → rien tant qu'on ne sait pas.
+  if (status === 'loading') {
+    return (
+      <div className="relative flex min-h-screen items-center justify-center bg-[#0A0A0A]">
+        <div className="mx-auto h-8 w-8 animate-spin rounded-full border-2 border-[#00FF00] border-t-transparent" />
+      </div>
+    );
+  }
 
-  const handleSubmit = async (e: FormEvent) => {
-    e.preventDefault();
-    setChecking(true);
-    setError(false);
-    try {
-      // Validation SÉCURISÉE : le code est vérifié côté serveur (/api/access),
-      // plus jamais en clair dans le bundle front.
-      const resp = await fetch('/api/access', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ code: code.trim() }),
-      });
-      const data = await resp.json().catch(() => ({ allowed: false }));
-      if (resp.ok && data.allowed) {
-        setGranted(true);
-        try {
-          localStorage.setItem(STORAGE_KEY, 'true');
-        } catch {
-          // localStorage bloqué — session seulement
-        }
-      } else {
-        // 401 = code faux, 429 = trop de tentatives.
-        setError(true);
-        setAttempts((a) => a + 1);
-        setCode('');
-        if (resp.status === 429) {
-          setRateLimited(true);
-          // Backoff : on garde l'erreur visible plus longtemps (2s → 8s).
-          setTimeout(() => { setError(false); setRateLimited(false); }, 8000);
-        } else {
-          setTimeout(() => setError(false), 2000);
-        }
-      }
-    } catch {
-      // Erreur réseau / serveur — message générique.
-      setError(true);
-      setAttempts((a) => a + 1);
-      setCode('');
-      setTimeout(() => setError(false), 3000);
-    } finally {
-      setChecking(false);
-    }
-  };
-
-  // Access granted — render the app
-  if (granted) {
+  // Connecté → rend l'app.
+  if (status === 'authenticated' && session?.user) {
     return <>{children}</>;
   }
 
-  // Access gate — code entry screen
+  // Non connecté → écran d'accès.
   return (
     <div className="relative flex min-h-screen items-center justify-center overflow-hidden bg-[#0A0A0A] px-4">
       {/* Background glow */}
@@ -86,8 +42,6 @@ export function AccessGate({ children }: AccessGateProps) {
         style={{ backgroundColor: '#00FF00' }}
         aria-hidden
       />
-
-      {/* Grid pattern */}
       <div
         className="pointer-events-none absolute inset-0 opacity-[0.03]"
         style={{
@@ -104,95 +58,45 @@ export function AccessGate({ children }: AccessGateProps) {
         transition={{ duration: 0.5, ease: 'easeOut' }}
         className="relative w-full max-w-sm"
       >
-        {/* Logo / Icon */}
+        {/* Logo */}
         <div className="mb-8 text-center">
-          <motion.div
-            initial={{ scale: 0.8 }}
-            animate={{ scale: 1 }}
-            transition={{ delay: 0.2, type: 'spring', stiffness: 200 }}
+          <div
             className="mx-auto mb-4 flex h-16 w-16 items-center justify-center rounded-2xl border border-[#00FF00]/30 bg-[#00FF00]/10"
             style={{ boxShadow: '0 0 24px rgba(0,255,0,0.3)' }}
           >
             <Lock className="h-8 w-8 text-[#00FF00]" />
-          </motion.div>
+          </div>
           <h1 className="text-2xl font-black tracking-tight text-white">
             PRONO<span className="text-[#00FF00]" style={{ textShadow: '0 0 12px rgba(0,255,0,0.5)' }}>BOT</span>
           </h1>
           <p className="mt-1.5 text-xs text-zinc-500">
-            Accès restreint — Entrez votre code d'accès
+            Connectez-vous pour accéder aux pronostics
           </p>
         </div>
 
-        {/* Code entry form */}
-        <form onSubmit={handleSubmit} className="space-y-4">
-          <div className="relative">
-            <input
-              type="text"
-              inputMode="numeric"
-              autoFocus
-              autoComplete="off"
-              value={code}
-              onChange={(e) => {
-                setCode(e.target.value);
-                setError(false);
-                setRateLimited(false);
-              }}
-              placeholder="• • • • • •"
-              maxLength={6}
-              className={`w-full rounded-xl border bg-[#141414]/80 px-4 py-4 text-center text-2xl font-mono font-black tracking-[0.5em] text-white placeholder-zinc-700 outline-none transition-all ${
-                error
-                  ? 'border-red-500/60 bg-red-500/5'
-                  : 'border-[#2A2A2A] focus:border-[#00FF00]/60'
-              }`}
-              style={
-                error
-                  ? undefined
-                  : { boxShadow: code ? '0 0 16px rgba(0,255,0,0.15)' : undefined }
-              }
-              aria-label="Code d'accès"
-            />
-            <AnimatePresence>
-              {error && (
-                <motion.div
-                  initial={{ opacity: 0, y: -10 }}
-                  animate={{ opacity: 1, y: 0 }}
-                  exit={{ opacity: 0, y: -10 }}
-                  className="absolute -bottom-7 left-0 right-0 flex items-center justify-center gap-1.5 text-xs font-bold text-red-400"
-                >
-                  <AlertCircle className="h-3.5 w-3.5" />
-                  {rateLimited
-                    ? 'Trop de tentatives — attendez quelques secondes'
-                    : attempts >= 3
-                    ? 'Code incorrect — Accès refusé'
-                    : 'Code incorrect — Réessayez'}
-                </motion.div>
-              )}
-            </AnimatePresence>
-          </div>
-
+        {/* Boutons */}
+        <div className="space-y-3">
           <button
-            type="submit"
-            disabled={code.length < 4 || checking}
-            className="group flex w-full items-center justify-center gap-2 rounded-xl bg-[#00FF00] py-4 text-sm font-black uppercase tracking-wider text-black transition-all hover:bg-[#00CC00] disabled:cursor-not-allowed disabled:bg-[#333333] disabled:text-zinc-600"
-            style={code.length >= 4 && !checking ? { boxShadow: '0 0 20px rgba(0,255,0,0.4)' } : undefined}
+            type="button"
+            onClick={() => router.push('/auth/signin')}
+            className="flex w-full items-center justify-center gap-2 rounded-xl bg-[#00FF00] py-4 text-sm font-black uppercase tracking-wider text-black transition-all hover:bg-[#00CC00]"
+            style={{ boxShadow: '0 0 20px rgba(0,255,0,0.4)' }}
           >
-            {checking ? (
-              <>
-                <Loader2 className="h-4 w-4 animate-spin" />
-                Vérification...
-              </>
-            ) : (
-              <>
-                Accéder à l'app
-                <ArrowRight className="h-4 w-4 transition-transform group-hover:translate-x-1" />
-              </>
-            )}
+            <LogIn className="h-4 w-4" />
+            Se connecter
           </button>
-        </form>
+          <button
+            type="button"
+            onClick={() => router.push('/auth/register')}
+            className="flex w-full items-center justify-center gap-2 rounded-xl border border-[#00FF00]/40 bg-[#00FF00]/10 py-4 text-sm font-black uppercase tracking-wider text-[#00FF00] transition-all hover:bg-[#00FF00]/20"
+          >
+            <UserPlus className="h-4 w-4" />
+            Créer un compte
+          </button>
+        </div>
 
-        {/* Footer hint */}
         <p className="mt-8 text-center text-[10px] text-zinc-700">
-          PronoBot v2.5.1 · Accès sécurisé
+          PronoBot · Accès par compte sécurisé
         </p>
       </motion.div>
     </div>

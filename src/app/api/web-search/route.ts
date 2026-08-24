@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from 'next/server';
 import ZAI from 'z-ai-web-dev-sdk';
 import { rateLimitCheck } from '@/lib/redis';
 import { requireAuth } from '@/lib/auth-guard';
+import { getClientIP } from '@/lib/ip';
 
 // ────────────────────────────────────────────────────────────────────────────
 // /api/web-search
@@ -29,20 +30,19 @@ const CACHE_MAX_ENTRIES = 50; // LRU eviction limit (prevents memory DoS)
 // Délégué à src/lib/redis.ts (Redis si configuré, in-memory sinon).
 // ────────────────────────────────────────────────────────────────────────────
 const WEB_SEARCH_RATE_LIMIT_MAX = 5; // 5 searches per minute per IP
-
-function getClientIP(request: NextRequest): string {
-  // NOTE: Behind Caddy, X-Forwarded-For is set by the proxy and trusted.
-  // A direct attacker cannot spoof it because Caddy overwrites the header.
-  const forwarded = request.headers.get('x-forwarded-for');
-  if (forwarded) return forwarded.split(',')[0].trim();
-  const realIP = request.headers.get('x-real-ip');
-  if (realIP) return realIP;
-  return 'unknown';
-}
+// Quota global (toutes IPs confondues) — protection anti-DoS de la facture LLM.
+const WEB_SEARCH_GLOBAL_MAX = 200; // 200 recherches/heure au total
 
 async function checkWebSearchRateLimit(ip: string): Promise<{ allowed: boolean; resetAt: number }> {
+  // Quota par IP (déjà authentifié) plus serré : 5 req/min.
   const result = await rateLimitCheck(`websearch:${ip}`, WEB_SEARCH_RATE_LIMIT_MAX, 60);
-  return { allowed: result.allowed, resetAt: result.resetAt };
+  if (!result.allowed) return { allowed: false, resetAt: result.resetAt };
+
+  // Quota GLOBAL anti-DoS financier : chaque requête déclenche un appel LLM
+  // (facturé). On plafonne le total toutes IPs confondues à 200/heure pour
+  // protéger la facture même en cas de compte compromis ou de botnet.
+  const global = await rateLimitCheck('websearch:global', WEB_SEARCH_GLOBAL_MAX, 3600);
+  return { allowed: global.allowed, resetAt: global.resetAt };
 }
 
 function setCache(key: string, data: any): void {
@@ -832,6 +832,7 @@ Analyse ce match en priorisant les SNIPPETS BUTEURS et TOP SCORER pour le champ 
     } else {
       const gs = insights.goalscorers;
       if (typeof gs.top_scorer !== 'string') gs.top_scorer = '';
+      else if (!/^[^<>{}"']{1,80}$/.test(gs.top_scorer)) gs.top_scorer = '';
       gs.top_scorer_team = gs.top_scorer_team === 'away' ? 'away' : 'home';
       if (!['high', 'medium', 'low'].includes(gs.confidence)) gs.confidence = 'low';
       if (!Array.isArray(gs.alternative_scorers)) gs.alternative_scorers = [];

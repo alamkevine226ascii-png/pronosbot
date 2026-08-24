@@ -44,6 +44,14 @@ export default function RegisterPage() {
         return;
       }
 
+      // Réponse neutre anti-énumération : si user === null, l'email existe
+      // peut-être déjà — on affiche le même message que pour un succès partiel.
+      if (data?.user === null) {
+        setError(data?.message || "Vérifie ta boîte mail pour confirmer l'inscription.");
+        setTimeout(() => router.push('/auth/signin'), 1500);
+        return;
+      }
+
       // 2) Connecter automatiquement le nouvel utilisateur
       const signRes = await signIn('credentials', {
         email,

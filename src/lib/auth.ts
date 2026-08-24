@@ -2,6 +2,8 @@ import NextAuth, { type NextAuthOptions } from 'next-auth';
 import CredentialsProvider from 'next-auth/providers/credentials';
 import bcrypt from 'bcryptjs';
 import { db } from '@/lib/db';
+import { rateLimitCheck } from '@/lib/redis';
+import { getClientIP } from '@/lib/ip';
 
 /**
  * ─────────────────────────────────────────────────────────────────────────
@@ -29,11 +31,29 @@ export const authOptions: NextAuthOptions = {
       },
 
       // Appelé à chaque tentative de connexion. Retourne un user si OK, null sinon.
-      async authorize(credentials) {
+      async authorize(credentials, req) {
         if (!credentials?.email || !credentials.password) return null;
 
         const email = credentials.email.trim().toLowerCase();
         const password = credentials.password;
+
+        // === ANTI BRUTE-FORCE sur le LOGIN — DOUBLE limite ===
+        // 1. Par email : protège le COMPTE (verrouillage distribué, même si
+        //    l'attaquant change d'IP à chaque essai).
+        // 2. Par IP : bloque le brute-force DISTRIBUTÉ depuis une seule IP.
+        // L'IP est extraite via la fonction partagée sécurisée (dernier hop
+        // de X-Forwarded-For / x-vercel-forwarded-for, non spoofable).
+        const ip = req ? getClientIP(req as unknown as import('next/server').NextRequest) : 'unknown';
+        const rlEmail = await rateLimitCheck(`login:${email}`, 10, 60 * 15);
+        if (!rlEmail.allowed) {
+          throw new Error('Trop de tentatives de connexion. Réessayez plus tard.');
+        }
+        if (ip !== 'unknown') {
+          const rlIp = await rateLimitCheck(`login-ip:${ip}`, 20, 60 * 15);
+          if (!rlIp.allowed) {
+            throw new Error('Trop de tentatives de connexion. Réessayez plus tard.');
+          }
+        }
 
         const user = await db.user.findUnique({ where: { email } });
         // Utilisateur inconnu OU pas de mot de passe défini (ex: compte sans mdp) → refus.

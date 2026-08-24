@@ -31,6 +31,24 @@ const STATIC_CACHE = `${VERSION}-static`;
 const API_CACHE = `${VERSION}-api`;
 const RUNTIME_CACHE = `${VERSION}-runtime`;
 const API_CACHE_TTL_MS = 5 * 60 * 1000; // 5 minutes — keep offline fallback fresh
+// RUNTIME_CACHE hard cap — simple FIFO eviction beyond this many entries so a
+// long session can't grow the cache unbounded.
+const RUNTIME_CACHE_MAX_ENTRIES = 50;
+
+/**
+ * Put `resp` into `cache` under `req`, then trim oldest entries (FIFO) when
+ * the cache exceeds RUNTIME_CACHE_MAX_ENTRIES.
+ */
+async function trimPut(cache, req, resp) {
+  await cache.put(req, resp);
+  const keys = await cache.keys();
+  if (keys.length > RUNTIME_CACHE_MAX_ENTRIES) {
+    // keys() is in insertion order for CacheStorage-backed caches; delete the
+    // oldest overflow entries first.
+    const excess = keys.length - RUNTIME_CACHE_MAX_ENTRIES;
+    await Promise.all(keys.slice(0, excess).map((k) => cache.delete(k)));
+  }
+}
 
 const PRECACHE_URLS = [
   '/',
@@ -112,16 +130,28 @@ self.addEventListener('fetch', (event) => {
     return;
   }
 
-  // Navigation: network-first, fallback cached "/"
+  // Navigation: network-first, fallback cached "/" (only for navigations to "/")
   if (req.mode === 'navigate') {
     event.respondWith(
       fetch(req)
         .then((res) => {
-          const clone = res.clone();
-          caches.open(RUNTIME_CACHE).then((c) => c.put(req, clone)).catch(() => {});
+          // Only cache successful, basic (same-origin) responses — never error
+          // or opaque responses.
+          if (res && res.ok) {
+            const clone = res.clone();
+            caches.open(RUNTIME_CACHE).then((c) => trimPut(c, req, clone)).catch(() => {});
+          }
           return res;
         })
-        .catch(() => caches.match(req).then((r) => r || caches.match('/')))
+        .catch(() =>
+          caches.match(req).then((r) => {
+            if (r) return r;
+            // Offline fallback: serve cached '/' only when the navigation is
+            // actually for '/', not for arbitrary paths.
+            const path = new URL(req.url).pathname;
+            return path === '/' ? caches.match('/') : undefined;
+          })
+        )
     );
     return;
   }
@@ -131,9 +161,9 @@ self.addEventListener('fetch', (event) => {
     caches.match(req).then((cached) => {
       if (cached) return cached;
       return fetch(req).then((res) => {
-        if (res && res.status === 200) {
+        if (res && res.ok) {
           const clone = res.clone();
-          caches.open(RUNTIME_CACHE).then((c) => c.put(req, clone)).catch(() => {});
+          caches.open(RUNTIME_CACHE).then((c) => trimPut(c, req, clone)).catch(() => {});
         }
         return res;
       });

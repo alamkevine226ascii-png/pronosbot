@@ -8,6 +8,13 @@ const nextConfig: NextConfig = {
   turbopack: {
     root: process.cwd(),
   },
+  // Lock the image optimizer to only the logo CDNs actually used by the app.
+  images: {
+    remotePatterns: [
+      { protocol: "https", hostname: "a.espncdn.com" },
+      { protocol: "https", hostname: "media.api-sports.io" },
+    ],
+  },
   typescript: {
     ignoreBuildErrors: false,
   },
@@ -54,9 +61,11 @@ const nextConfig: NextConfig = {
               // dev (HMR) — keep it for dev, drop in prod via the env check below.
               `script-src 'self' 'unsafe-inline'${process.env.NODE_ENV === 'production' ? '' : " 'unsafe-eval'"}`,
               "style-src 'self' 'unsafe-inline'",
-              // Only allow images from self, data: URIs (favicons), and HTTPS
-              // (ESPN team logos). http: is intentionally blocked.
-              "img-src 'self' data: https:",
+              // Only allow images from self, data: URIs (favicons), and the two
+              // logo CDNs actually used by the app: ESPN team logos (served by
+              // the ESPN scoreboard API via a.espncdn.com) and API-Football
+              // team logos (*.media.api-sports.io). Wildcard https: removed.
+              "img-src 'self' data: https://a.espncdn.com https://*.media.api-sports.io",
               "font-src 'self' data:",
               // Restrict fetch/WebSocket to same-origin only — blocks exfil
               // to attacker-controlled endpoints. ESPN logos are loaded as

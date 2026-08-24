@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from 'next/server';
 import bcrypt from 'bcryptjs';
 import { db } from '@/lib/db';
 import { rateLimitCheck } from '@/lib/redis';
+import { getClientIP } from '@/lib/ip';
 
 /**
  * POST /api/register — crée un compte utilisateur.
@@ -18,14 +19,7 @@ export const runtime = 'nodejs';
 // Moins d'essais que /api/access (un compte par IP, c'est rare d'en créer beaucoup)
 const REGISTER_RATE_LIMIT_MAX = 3;
 const REGISTER_RATE_LIMIT_WINDOW = 60 * 10; // 10 minutes
-
-function getClientIP(request: NextRequest): string {
-  const forwarded = request.headers.get('x-forwarded-for');
-  if (forwarded) return forwarded.split(',')[0].trim();
-  const realIP = request.headers.get('x-real-ip');
-  if (realIP) return realIP;
-  return 'unknown';
-}
+// getClientIP importé depuis '@/lib/ip' (extraction d'IP sécurisée, anti-spoofing).
 
 export async function POST(request: NextRequest) {
   // === RATE LIMITING (10 min / IP) ===
@@ -56,21 +50,45 @@ export async function POST(request: NextRequest) {
   if (!email || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
     return NextResponse.json({ error: 'Email invalide.' }, { status: 400 });
   }
+  if (email.length > 254) {
+    return NextResponse.json(
+      { error: "L'adresse email ne doit pas dépasser 254 caractères." },
+      { status: 400 }
+    );
+  }
   if (password.length < 8) {
     return NextResponse.json(
       { error: 'Le mot de passe doit faire au moins 8 caractères.' },
       { status: 400 }
     );
   }
+  if (password.length > 128) {
+    return NextResponse.json(
+      { error: 'Le mot de passe ne doit pas dépasser 128 caractères.' },
+      { status: 400 }
+    );
+  }
 
   // === ÉVITER DOUBLON d'email ===
+  // SÉCURITÉ (anti-énumération) : on ne révèle PAS si l'email existe déjà.
+  // Réponse identique (200 + message neutre) que le compte existe ou non —
+  // un attaquant ne peut pas deviner qui a un compte. (La création réelle
+  // reste protégée par le unique() de Prisma : en cas de course, elle échoue
+  // silencieusement côté serveur.)
   const existing = await db.user.findUnique({ where: { email } });
   if (existing) {
-    // On ne révèle pas si le mail existe *réellement* pour éviter de deviner
-    // les comptes — on renvoie un message neutre.
+    // Anti-énumération temporelle : le cas succès fait un bcrypt.hash (~100ms).
+    // On fait un bcrypt.compare contre le hash existant pour égaliser le temps
+    // de réponse — sinon un attaquant pourrait distinguer "email connu"
+    // (rapide) de "email nouveau" (lent) via une attaque par analyse temporelle.
+    await bcrypt.compare(password, existing.passwordHash ?? '').catch(() => null);
     return NextResponse.json(
-      { error: 'Un compte avec cet email existe déjà.' },
-      { status: 409 }
+      {
+        user: null,
+        message:
+          "Si cet email n'a pas déjà de compte, vérifie ta boîte de réception pour confirmer ton inscription.",
+      },
+      { status: 200 }
     );
   }
 

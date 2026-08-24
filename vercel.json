@@ -7,10 +7,10 @@
   "regions": ["cdg1"],
   "functions": {
     "src/app/api/matchs/route.ts": {
-      "maxDuration": 60
+      "maxDuration": 30
     },
     "src/app/api/web-search/route.ts": {
-      "maxDuration": 60
+      "maxDuration": 30
     }
   },
   "crons": []

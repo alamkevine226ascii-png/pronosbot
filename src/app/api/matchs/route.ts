@@ -642,10 +642,20 @@ function generatePronostic(match: any): any {
     bet.risque = Math.round(bet.risque * 100) / 100;
   }
 
-  // Filtrer: proba >= 40% et cote >= 1.3 (élargi pour inclure plus de paris)
+  // Filtrer: proba >= 40%, cote >= 1.3 ET EV >= -0.05 (BUG QA FIX : ne plus
+  // recommander de paris franchement perdants — un pari à EV très négative
+  // fait perdre de l'argent en moyenne, ce qui contredit la promesse du produit).
+  // Si AUCUN pari ne passe le filtre EV, on retombe sur viableBets sans la
+  // contrainte EV mais on flag le pari choisi comme `ev_negative`.
+  const evFloor = -0.05;
+  const evViableBets = allBets.filter(b => b.probabilite >= 0.40 && b.cote >= 1.3 && b.ev >= evFloor);
   const viableBets = allBets.filter(b => b.probabilite >= 0.40 && b.cote >= 1.3);
-  const sortedBets = (viableBets.length > 0 ? viableBets : allBets).sort((a, b) => b.score_selection - a.score_selection);
+  const sortedBets = (evViableBets.length > 0 ? evViableBets : viableBets.length > 0 ? viableBets : allBets)
+    .sort((a, b) => b.score_selection - a.score_selection);
   const bestBet = sortedBets[0];
+  if (bestBet && bestBet.ev < evFloor) {
+    bestBet.ev_negative = true; // l'UI peut afficher un avertissement "aucun pari rentable détecté"
+  }
 
   // === TOTAL ASIATIQUE (analyse uniquement — hors tous_paris) ===
   // Lignes asiatiques ¼ (1.25, 1.75, 2.25...) = moyenne de 2 demi-lignes (remboursement partiel).
@@ -813,13 +823,7 @@ function generateCombiners(matchs: any[]): any[] {
 // === RATE LIMITING === (le cache global est défini plus bas avec l'ajout Redis)
 const RATE_LIMIT_MAX = 10; // 10 requetes par minute par IP
 
-function getClientIP(request: NextRequest): string {
-  const forwarded = request.headers.get('x-forwarded-for');
-  if (forwarded) return forwarded.split(',')[0].trim();
-  const realIP = request.headers.get('x-real-ip');
-  if (realIP) return realIP;
-  return 'unknown';
-}
+import { getClientIP } from '@/lib/ip';
 
 async function checkRateLimit(ip: string): Promise<{ allowed: boolean; resetAt: number }> {
   const result = await rateLimitCheck(`matchs:${ip}`, RATE_LIMIT_MAX, 60);

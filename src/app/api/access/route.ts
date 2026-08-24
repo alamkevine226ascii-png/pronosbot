@@ -2,9 +2,10 @@ import { NextRequest, NextResponse } from 'next/server';
 import { rateLimitCheck } from '@/lib/redis';
 
 // Code d'accès stocké côté SERVEUR (env var). JAMAIS dans le bundle front.
-// Fallback dev : '230409' (garder le comportement actuel tant que ACCESS_CODE n'est pas défini).
-// En production, définir ACCESS_CODE sur la plateforme d'hébergement (Vercel) et le changer.
-const ACCESS_CODE = process.env.ACCESS_CODE || '230409';
+// SÉCURITÉ : plus AUCUN code par défaut. Si ACCESS_CODE n'est pas défini,
+// la route répond 503 (service indisponible) au lieu d'accepter un code connu.
+// → Définir ACCESS_CODE sur Vercel (valeur forte, min 12 caractères aléatoires).
+const ACCESS_CODE = process.env.ACCESS_CODE;
 
 // Anti brute-force : 5 essais/min par IP (le code est court, donc réponses rapides → rate limit serré).
 const ACCESS_RATE_LIMIT_MAX = 5;
@@ -12,15 +13,28 @@ const ACCESS_RATE_LIMIT_WINDOW = 60;
 
 export const runtime = 'nodejs';
 
-function getClientIP(request: NextRequest): string {
-  const forwarded = request.headers.get('x-forwarded-for');
-  if (forwarded) return forwarded.split(',')[0].trim();
-  const realIP = request.headers.get('x-real-ip');
-  if (realIP) return realIP;
-  return 'unknown';
+import { getClientIP } from '@/lib/ip';
+import { createHash, timingSafeEqual } from 'node:crypto';
+
+// Comparaison constant-time du code d'accès (anti timing-attack) :
+// on hache les DEUX côtés en sha256 pour égaliser les longueurs, puis
+// timingSafeEqual. Un simple `===` fuit la longueur/position du préfixe correct.
+function safeCodeCompare(submitted: string, expected: string): boolean {
+  const a = createHash('sha256').update(submitted).digest();
+  const b = createHash('sha256').update(expected).digest();
+  return timingSafeEqual(a, b);
 }
 
 export async function POST(request: NextRequest) {
+  // === GARDE-FOU : pas de ACCESS_CODE configuré → refus total (jamais de fallback) ===
+  if (!ACCESS_CODE) {
+    console.error('[access] ACCESS_CODE non défini — route désactivée.');
+    return NextResponse.json(
+      { allowed: false, error: "Service d'accès non configuré." },
+      { status: 503 }
+    );
+  }
+
   // === RATE LIMITING (empêche le brute-force du code) ===
   const clientIP = getClientIP(request);
   const rl = await rateLimitCheck(`access:${clientIP}`, ACCESS_RATE_LIMIT_MAX, ACCESS_RATE_LIMIT_WINDOW);
@@ -41,7 +55,7 @@ export async function POST(request: NextRequest) {
     submitted = undefined;
   }
 
-  if (typeof submitted === 'string' && submitted.trim() === ACCESS_CODE) {
+  if (typeof submitted === 'string' && safeCodeCompare(submitted.trim(), ACCESS_CODE)) {
     return NextResponse.json({ allowed: true });
   }
 

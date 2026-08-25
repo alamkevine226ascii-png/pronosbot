@@ -3,7 +3,6 @@ import CredentialsProvider from 'next-auth/providers/credentials';
 import bcrypt from 'bcryptjs';
 import { db } from '@/lib/db';
 import { rateLimitCheck } from '@/lib/redis';
-import { getClientIP } from '@/lib/ip';
 
 /**
  * ─────────────────────────────────────────────────────────────────────────
@@ -31,6 +30,10 @@ export const authOptions: NextAuthOptions = {
       },
 
       // Appelé à chaque tentative de connexion. Retourne un user si OK, null sinon.
+      // ⚠️ NextAuth v4 : `req` est un objet { headers?, query?, body? } SIMPLE,
+      // PAS un NextRequest — d'où l'erreur "e.headers.get is not a function"
+      // si on lui applique getClientIP(NextRequest). On lit les en-têtes
+      // défensivement (get peut être absent selon le runtime).
       async authorize(credentials, req) {
         if (!credentials?.email || !credentials.password) return null;
 
@@ -38,12 +41,31 @@ export const authOptions: NextAuthOptions = {
         const password = credentials.password;
 
         // === ANTI BRUTE-FORCE sur le LOGIN — DOUBLE limite ===
-        // 1. Par email : protège le COMPTE (verrouillage distribué, même si
-        //    l'attaquant change d'IP à chaque essai).
-        // 2. Par IP : bloque le brute-force DISTRIBUTÉ depuis une seule IP.
-        // L'IP est extraite via la fonction partagée sécurisée (dernier hop
-        // de X-Forwarded-For / x-vercel-forwarded-for, non spoofable).
-        const ip = req ? getClientIP(req as unknown as import('next/server').NextRequest) : 'unknown';
+        // 1. Par email : protège le COMPTE.
+        // 2. Par IP si récupérable SANS risquer de faire planter le login :
+        //    extraction défensive, fallback 'unknown' au moindre doute.
+        let ip = 'unknown';
+        try {
+          const headers = (req as unknown as { headers?: unknown })?.headers;
+          const getFn =
+            typeof (headers as { get?: unknown })?.get === 'function'
+              ? (headers as Headers).get.bind(headers)
+              : null;
+          if (getFn) {
+            const vercelFF = getFn('x-vercel-forwarded-for');
+            if (vercelFF) ip = vercelFF.split(',').pop()?.trim() || 'unknown';
+            if (ip === 'unknown') {
+              const xff = getFn('x-forwarded-for');
+              if (xff) ip = xff.split(',').pop()?.trim() || 'unknown';
+            }
+            if (ip === 'unknown') {
+              ip = getFn('x-real-ip')?.trim() || 'unknown';
+            }
+          }
+        } catch {
+          ip = 'unknown'; // jamais bloquer une connexion pour un souci d'en-tête
+        }
+
         const rlEmail = await rateLimitCheck(`login:${email}`, 10, 60 * 15);
         if (!rlEmail.allowed) {
           throw new Error('Trop de tentatives de connexion. Réessayez plus tard.');

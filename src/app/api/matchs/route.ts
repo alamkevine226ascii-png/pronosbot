@@ -5,24 +5,75 @@ import { rateLimitCheck, cacheSet, cacheGetRaw, isRedisEnabled } from '@/lib/red
 import { requireAuth } from '@/lib/auth-guard';
 
 const ESPN_BASE = 'https://site.api.espn.com/apis/site/v2/sports/soccer';
+const ESPN_CORE = 'https://sports.core.api.espn.com/v2/sports/soccer';
 
-const LEAGUES: Record<string, string> = {
-  // Compétitions internationales
-  'fifa.world': 'Coupe du Monde', 'uefa.champions': 'LDC', 'uefa.euro': 'Euro', 'fifa.cwc': 'CWC',
-  // Top 5 européen
-  'eng.1': 'Premier League', 'esp.1': 'La Liga', 'ita.1': 'Serie A', 'ger.1': 'Bundesliga', 'fra.1': 'Ligue 1',
-  // Brésil + USA + Amériques + Asie
-  'bra.1': 'Championnat du Brésil Série A', 'bra.2': 'Brasileirao B',
-  'usa.1': 'MLS', 'arg.1': 'Liga Argentina', 'chn.1': 'Chinese Super League',
-  // Amériques (coupes continentales)
-  'conmebol.libertadores': 'Copa Libertadores',
-  // === NOUVELLES LIGUES (Option C) ===
-  'uefa.europa': 'Europa League', 'uefa.europa.conf': 'Conference League', 'uefa.nations': 'Ligue des Nations',
-  'eng.2': 'Championship', 'esp.2': 'La Liga 2', 'ita.2': 'Serie B', 'fra.2': 'Ligue 2',
-  'ned.1': 'Eredivisie', 'por.1': 'Liga Portugal', 'tur.1': 'Süper Lig',
-  'eng.fa': 'FA Cup', 'eng.league_cup': 'EFL Cup',
-  'jpn.1': 'J1 League',
-};
+// ─────────────────────────────────────────────────────────────────────────────
+// DÉCOUVERTE DYNAMIQUE DES LIGUES
+// Au lieu d'une liste hardcodée, on découvre TOUTES les ligues disponibles
+// via l'API ESPN. Le mapping { numeric_id → slug } est construit une fois
+// et mis en cache.
+// ─────────────────────────────────────────────────────────────────────────────
+let leagueMapCache: Record<string, { slug: string; name: string }> | null = null;
+let leagueMapTimestamp = 0;
+const LEAGUE_MAP_TTL = 24 * 60 * 60 * 1000; // 24h
+
+async function buildLeagueMap(): Promise<Record<string, { slug: string; name: string }>> {
+  // Retourne le cache s'il est encore frais
+  if (leagueMapCache && Date.now() - leagueMapTimestamp < LEAGUE_MAP_TTL) {
+    return leagueMapCache;
+  }
+
+  console.log('[matchs] Découverte dynamique des ligues ESPN...');
+  const map: Record<string, { slug: string; name: string }> = {};
+
+  // 1. Récupérer TOUS les slugs depuis l'API des ligues (jusqu'à 9 pages)
+  const allSlugs: string[] = [];
+  for (let page = 1; page <= 9; page++) {
+    try {
+      const r = await fetch(`${ESPN_CORE}/leagues?page=${page}`, { signal: AbortSignal.timeout(10000) });
+      if (!r.ok) break;
+      const d = await r.json();
+      if (!d.items || d.items.length === 0) break;
+      for (const item of d.items) {
+        const ref = item.$ref || '';
+        const m = ref.match(/\/leagues\/([^?]+)/);
+        if (m) allSlugs.push(m[1]);
+      }
+      if (d.pageIndex >= d.pageCount) break;
+    } catch { break; }
+  }
+  console.log(`[matchs] ${allSlugs.length} slugs de ligues trouvés`);
+
+  // 2. Résoudre chaque slug en suivant $ref pour obtenir l'ID numérique
+  // Batch de 10 en parallèle pour ne pas saturer ESPN
+  for (let i = 0; i < allSlugs.length; i += 10) {
+    const batch = allSlugs.slice(i, i + 10);
+    await Promise.all(batch.map(async (slug) => {
+      try {
+        const r = await fetch(`${ESPN_CORE}/leagues/${slug}?lang=en&region=us`, { signal: AbortSignal.timeout(5000) });
+        if (r.ok) {
+          const d = await r.json();
+          const numericId = String(d.id || '');
+          const name = d.name || d.displayName || slug;
+          if (numericId && !map[numericId]) {
+            map[numericId] = { slug, name };
+          }
+        }
+      } catch { /* silencieux */ }
+    }));
+  }
+
+  console.log(`[matchs] ${Object.keys(map).length} ligues mappées (numeric_id → slug)`);
+  leagueMapCache = map;
+  leagueMapTimestamp = Date.now();
+  return map;
+}
+
+// Invalide le cache (utile pour les tests)
+function invalidateLeagueMap() {
+  leagueMapCache = null;
+  leagueMapTimestamp = 0;
+}
 
 const TEAM_FR: Record<string, string> = {
   'Norway': 'Norvège', 'France': 'France', 'Senegal': 'Sénégal', 'Iraq': 'Iraq',
@@ -916,48 +967,51 @@ async function buildResponseData(rangeStr: string, datesArray: string[]): Promis
     fdOddsMap = new Map();
   }
 
-  // Compteurs de diagnostic: { ligue, eventsESPN, gardés, skippés }
-  const stats: Array<{ ligue: string; eventsESPN: number; gardes: number; skipped: number }> = [];
+  // === APPROCHE UNIFIÉE : 1 SEUL appel à l'endpoint "all" + résolution des ligues ===
+  // L'endpoint /all/scoreboard retourne TOUS les matchs de TOUTES les compétitions
+  // disponibles sur ESPN en UN SEUL appel. Les IDs de ligues sont numériques (dans l'UID).
+  // On les résout en slugs via l'API de découverte des ligues.
+  // → Plus de liste hardcodée, plus de 25 appels parallèles.
+  let totalEventsESPN = 0;
+  let eventsProcessed = 0;
+  let eventsSkipped = 0;
 
-  // 1 SEULE requête/ligue (plage 7 jours) — fetch parallel
-  const fetchPromises: Promise<void>[] = [];
-  // Compteur de ligues où le fetch ESPN a échoué (HTTP non-OK / timeout / exception).
-  // Rendu visible dans le log de diagnostic : si fetchFailed === nb de ligues → count 0 expliqué.
-  let fetchFailed = 0;
+  // Construire (ou utiliser le cache) du mapping ID numérique → slug
+  const leagueMap = await buildLeagueMap();
 
-  for (const [leagueId, leagueName] of Object.entries(LEAGUES)) {
-    fetchPromises.push((async () => {
-      try {
-        const resp = await fetch(`${ESPN_BASE}/${leagueId}/scoreboard?dates=${rangeStr}`, { signal: AbortSignal.timeout(10000) });
-        if (!resp.ok) {
-          // BUG FIX : TOUTE erreur HTTP doit être visible dans les logs Vercel.
-          // Avant : seul 404/400 était loggé ; 429 (rate-limit) et 5xx (panne ESPN)
-          // étaient avalés silencieusement → count 0 sans aucune trace.
-          if (resp.status === 404 || resp.status === 400) {
-            console.warn(`[matchs] ESPN ${leagueId}: ID invalide (HTTP ${resp.status}) — à corriger dans LEAGUES`);
-          } else if (resp.status === 429 || resp.status === 403) {
-            console.warn(`[matchs] ESPN ${leagueId}: rate-limit (HTTP ${resp.status}) — matchs perdus pour cette ligue`);
-          } else {
-            console.warn(`[matchs] ESPN ${leagueId}: erreur HTTP ${resp.status} — matchs perdus pour cette ligue`);
-          }
-          fetchFailed++;
-          return;
-        }
+  try {
+      const resp = await fetch(
+        `${ESPN_BASE}/all/scoreboard?dates=${rangeStr}&limit=500`,
+        { signal: AbortSignal.timeout(15000) }
+      );
+
+      if (!resp.ok) {
+        console.warn(`[matchs] ESPN all/scoreboard: HTTP ${resp.status} — fallback sur contenu du cache`);
+      } else {
         const data = await resp.json();
-        const eventsCount = (data.events || []).length;
-        let gardes = 0;
-        let skipped = 0;
+        const events = data.events || [];
+        totalEventsESPN = events.length;
+        console.log(`[matchs] ESPN all/scoreboard: ${events.length} événements trouvés (toutes ligues confondues)`);
 
-        for (const ev of data.events || []) {
+        for (const ev of events) {
           try {
             const comps = ev.competitions?.[0] || {};
             const competitors = comps.competitors || [];
-            // `continue` (pas `return`) pour ne pas skip les matchs suivants.
             if (competitors.length < 2) {
-              console.warn(`[matchs] Match ${ev.id || '?'} ignoré: ${competitors.length} compétiteur(s) seulement`);
-              skipped++;
+              eventsSkipped++;
               continue;
             }
+
+            // Extraire l'ID numérique de la ligue depuis l'UID de la compétition
+            // Format: "s:600~l:3954~e:401875201~c:401875201"
+            const uid = comps.uid || '';
+            const numericId = uid.match(/l:(\d+)/)?.[1] || '';
+          
+            // Résoudre la ligue via le mapping → obtenir slug + nom
+            const leagueInfo = leagueMap[numericId] || {};
+            const leagueSlug = leagueInfo.slug || `league_${numericId}`;
+            const realLeagueName = leagueInfo.name || `Compétition #${numericId}`;
+
             const home = competitors.find((c:any)=>c.homeAway==='home') || competitors[0];
             const away = competitors.find((c:any)=>c.homeAway==='away') || competitors[1];
             const homeName = home.team?.displayName || '?';
@@ -986,11 +1040,7 @@ async function buildResponseData(rangeStr: string, datesArray: string[]): Promis
             if (!cotes) {
               const afResult = await findApiFootballOdds(homeName, awayName, afOddsMap);
               if (afResult) {
-                cotes = {
-                  ...afResult.cotes,
-                  estimated: false, // VRAIES cotes, pas estimées
-                  source: 'api_football',
-                };
+                cotes = { ...afResult.cotes, estimated: false, source: 'api_football' };
                 oddsSource = 'api_football';
               }
             }
@@ -998,71 +1048,48 @@ async function buildResponseData(rangeStr: string, datesArray: string[]): Promis
             if (!cotes) {
               const fdResult = await findFootballDataOdds(homeName, awayName, fdOddsMap);
               if (fdResult) {
-                cotes = {
-                  ...fdResult.cotes,
-                  estimated: false, // BUG FIX #34: Football-Data agrège de VRAIES cotes (11 bookmakers).
-                  source: 'football_data',
-                };
+                cotes = { ...fdResult.cotes, estimated: false, source: 'football_data' };
                 oddsSource = 'football_data';
               }
             }
 
             if (!cotes && (cotes = extractPredictorCotes(comps))) oddsSource = 'espn_predictor';
-            const context = detectContext(ev, leagueId);
-            const [homeForm, awayForm] = await Promise.all([getTeamForm(homeId, leagueId), getTeamForm(awayId, leagueId)]);
+            const context = detectContext(ev, leagueSlug);
+            const [homeForm, awayForm] = await Promise.all([getTeamForm(homeId, leagueSlug), getTeamForm(awayId, leagueSlug)]);
             if (!cotes) { cotes = generateFormBasedCotes(homeForm, awayForm); oddsSource = 'form_based'; }
 
             const match = {
               id: String(ev.id||''), home_name: homeName, away_name: awayName,
               home_name_fr: translateTeamFr(homeName), away_name_fr: translateTeamFr(awayName),
-              home_id: homeId, away_id: awayId, competition: leagueName, competition_id: leagueId,
+              home_id: homeId, away_id: awayId, competition: realLeagueName, competition_id: leagueSlug,
               home_logo: homeLogo, away_logo: awayLogo, home_color: homeColor, away_color: awayColor,
               heure, cotes, odds_source: oddsSource, status: comps.status?.type?.shortName||'?',
-              // BUG #1 FIX : utiliser parseScore() (fonction module-level) au lieu de `home.score||'0'`
-              // qui retournait l'objet brut ESPN {value, displayValue, winner} → affichage "[object Object]".
-              score_home: parseScore(home.score), score_away: parseScore(away.score), live_status: comps.status?.type?.shortName||'',
-              // BUG #28 FIX : ajouter 'BT' (break time) et 'LIVE' (générique) aux statuts "en direct".
-              // Avant : matchs en pause mi-temps ou statut générique LIVE étaient marqués non-live.
+              score_home: parseScore(home.score), score_away: parseScore(away.score),
+              live_status: comps.status?.type?.shortName||'',
               is_live: ['1H','HT','2H','ET','P','BT','LIVE'].includes(comps.status?.type?.shortName||''),
               home_form: homeForm, away_form: awayForm, context, date_match: matchDate,
             };
 
             const pronostic = generatePronostic(match);
             allMatchs.push({ ...match, pronostic });
-            gardes++;
-          } catch (e) { console.warn(`[matchs] Parse error: ${e instanceof Error ? e.message : 'unknown'}`); skipped++; }
+            eventsProcessed++;
+          } catch (e) {
+            console.warn(`[matchs] Parse error: ${e instanceof Error ? e.message : 'unknown'}`);
+            eventsSkipped++;
+          }
         }
-        if (eventsCount > 0) {
-          stats.push({ ligue: `${leagueName} (${leagueId})`, eventsESPN: eventsCount, gardes, skipped });
-        }
-      } catch (e) {
-        const msg = e instanceof Error ? e.message : 'unknown';
-        // BUG FIX : rendre le timeout/échec réseau visible (avant : warning avalé sans contexte).
-        const isTimeout = e instanceof Error && e.name === 'TimeoutError';
-        console.warn(`[matchs] ESPN ${leagueId}: ${isTimeout ? 'TIMEOUT (>10s)' : 'échec réseau'} — ${msg}`);
-        fetchFailed++;
       }
-    })());
-  }
-
-  // Attendre tous les fetchs en parallel
-  await Promise.all(fetchPromises);
-
-  // === LOG DE DIAGNOSTIC: vérifier gardés = ESPN (sinon matchs perdus) ===
-  const totalESPN = stats.reduce((s, x) => s + x.eventsESPN, 0);
-  const totalGardes = stats.reduce((s, x) => s + x.gardes, 0);
-  const totalSkipped = stats.reduce((s, x) => s + x.skipped, 0);
-  console.log(
-    `[matchs] Diagnostic: ESPN=${totalESPN} matchs | gardés=${totalGardes} | skippés=${totalSkipped} | ligues actives=${stats.length}/${Object.keys(LEAGUES).length} | fetchs ESPN échoués=${fetchFailed}/${Object.keys(LEAGUES).length}`
-  );
-  if (fetchFailed > 0) {
-    console.warn(`[matchs] ${fetchFailed} ligue(s) ESPN en échec — si toutes échouent, count=0 (source indisponible/rate-limit) mais le cache N'EST PAS empoisonné.`);
-  }
-  for (const s of stats) {
-    if (s.skipped > 0 || s.eventsESPN !== s.gardes) {
-      console.warn(`[matchs] ${s.ligue}: ESPN=${s.eventsESPN} gardés=${s.gardes} skippés=${s.skipped}`);
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : 'unknown';
+      const isTimeout = e instanceof Error && e.name === 'TimeoutError';
+      console.warn(`[matchs] ESPN all/scoreboard: ${isTimeout ? 'TIMEOUT (>15s)' : 'échec réseau'} — ${msg}`);
     }
-  }
+
+    // === LOG DE DIAGNOSTIC ===
+    console.log(`[matchs] ESPN: ${totalEventsESPN} événements bruts | ${eventsProcessed} gardés | ${eventsSkipped} ignorés | ${allMatchs.length} matchs avec pronostics`);
+    if (eventsSkipped > 0) {
+      console.warn(`[matchs] ${eventsSkipped} événements ignorés (compétiteurs insuffisants ou erreur de parsing)`);
+    }
 
   // Trier par date + heure
   allMatchs.sort((a, b) => {

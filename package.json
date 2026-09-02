@@ -82,5 +82,19 @@
     "tailwindcss": "^4",
     "tw-animate-css": "^1.3.5",
     "typescript": "^5.9.3"
-  }
+  },
+  "description": "Next.js 16 + Prisma + ESPN API + API-Football + Football-Data + LLM (z-ai-web-dev-sdk)",
+  "main": "index.js",
+  "repository": {
+    "type": "git",
+    "url": "git+https://@github.com/alamkevine226ascii-png/pronosbot.git"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "type": "commonjs",
+  "bugs": {
+    "url": "https://github.com/alamkevine226ascii-png/pronosbot/issues"
+  },
+  "homepage": "https://github.com/alamkevine226ascii-png/pronosbot#readme"
 }

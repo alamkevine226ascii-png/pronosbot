@@ -1,0 +1,237 @@
+/// Database schema for PronosBot — DB-First architecture with Neon PostgreSQL
+/// 
+/// This schema is designed to work with Neon (postgresql://) as the data source.
+/// All tables needed for the "DB-First" approach are defined here.
+/// 
+/// Usage:
+/// 1. Set DATABASE_URL in .env: postgresql://user:password@ep-name.region.postgres.neon.tech/dbname?sslmode=require
+/// 2. Run: prisma generate (after npm install prisma)
+/// 3. Run: prisma migrate deploy (initial setup)
+/// 4. Run: npm run build
+
+generator client {
+  provider = "postgresql"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+  // Neon connection settings
+  nativeTypesQuery = "SELECT column_name, data_type FROM information_schema.columns WHERE table_schema = 'public' AND table_name = $1"
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// COMPETITIONS — Ligues ESPN stockées en BDD
+// ─────────────────────────────────────────────────────────────────────────────
+model Competition {
+  id            String      @id @default(uuid())
+  name          String      // Ex: "Premier League", "Ligue 1"
+  slug          String      @unique // Ex: "eng.1", "fra.1"
+  espon_id      Int         // ID ESPN interne
+  is_active     Boolean     @default(true)
+  created_at    DateTime    @default(now())
+  updated_at    DateTime    @updatedAt
+
+  // Relation inverse pour les matches
+  matches       Match[]
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// MATCHES — Matchs de football avec pronostics DB-First
+// ─────────────────────────────────────────────────────────────────────────────
+model Match {
+  id            String      @id @default(uuid())
+  competition   Competition @relation(fields: [competition_id], references: [id])
+  competition_id String
+  
+  // Teams
+  home_team     Team        // Équipe à domicile (référencée par nom/ID)
+  away_team     Team        // Équipe extérieure (référencée par nom/ID)
+  home_id       String      // ID ESPN de l'équipe à domicile
+  away_id       String      // ID ESPN de l'équipe extérieure
+  
+  // Score & Status
+  home_score    Int         @default(0)
+  away_score    Int         @default(0)
+  status        String      // "1H", "HT", "2H", "LIVE", "FINAL", etc.
+  started_at    DateTime?   // When the match started
+  completed_at  DateTime?   // When the match ended
+  
+  // Heure du match
+  kickoff       DateTime    // Date et heure du coup d'envoi
+  date_str      String      // Date formatée (YYYY-MM-DD)
+  
+  // Métadonnées
+  is_live       Boolean     @default(false)
+  is_upcoming   Boolean     @default(true)
+  competition_name String    // Nom de la compétition (dénormalisé)
+  
+  created_at    DateTime    @default(now())
+  updated_at    DateTime    @updatedAt
+  
+  @@ index([competition_id])
+  @@ index([status])
+  @@ index([is_live])
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// TEAMS — Équipes de football
+// ─────────────────────────────────────────────────────────────────────────────
+model Team {
+  id            String      @id @default(uuid())
+  name          String      // Ex: "Manchester United", "Paris SG"
+  name_fr       String      // Nom en français
+  espon_id      Int         // ID ESPN interne
+  logo_url      String?     // URL du logo
+  color         String?     // Couleur de l'équipe
+  
+  // Relations
+  home_matches  Match[]     // Matches où cette équipe est à domicile
+  away_matches  Match[]     // Matches où cette équipe est à l'extérieur
+  
+  created_at    DateTime    @default(now())
+  updated_at    DateTime    @updatedAt
+  
+  @@ index([name])
+  @@ index([espon_id])
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// USERS — Utilisateurs avec authentification NextAuth
+// ─────────────────────────────────────────────────────────────────────────────
+model User {
+  id            String      @id @default(uuid())
+  email         String      @unique
+  name          String?
+  password      String?     // Pour auth classique (optionnel avec NextAuth)
+  emailVerified DateTime?  
+  image         String?
+  
+  // NextAuth relations
+  sessions      Session[]
+  accounts      Account[]
+  
+  // Pronostics de l'utilisateur
+  user_bets     UserBet[]
+  
+  created_at    DateTime    @default(now())
+  updated_at    DateTime    @updatedAt
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// ACCOUNTS NextAuth —Providers d'authentification
+// ─────────────────────────────────────────────────────────────────────────────
+model Account {
+  id                String      @id @default(uuid())
+  user_id           String      // Reference to User
+  type              String      // "credentials", "google", "github", etc.
+  provider          String      // "google", "github", "credentials"
+  provider_account_id String    // ID provider
+  refresh_token     String?     // Pour OAuth
+  access_token      String?     // Pour OAuth
+  expires_at        Int?        // Timestamp en secondes
+  token_type        String?     // "Bearer", etc.
+  scope             String?     // Étendue OAuth
+  id_token          String?     // JWT ID token
+  session_state     String?     // État de la session
+  
+  user              User        @relation(fields: [user_id], references: [id])
+  
+  created_at        DateTime    @default(now())
+  
+  @@ index([user_id])
+  @@ index([provider, provider_account_id])
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// SESSIONS NextAuth — Sessions utilisateur
+// ─────────────────────────────────────────────────────────────────────────────
+model Session {
+  id                String      @id @default(uuid())
+  user_id           String      // Reference to User
+  session_token     String      @unique // Token de session
+  expires_at        DateTime    // Date d'expiration
+  created_at        DateTime    @default(now())
+  
+  user              User        @relation(fields: [user_id], references: [id])
+  
+  @@ index([expires_at])
+  @@ index([session_token])
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// USER_BETS — Paris des utilisateurs
+// ─────────────────────────────────────────────────────────────────────────────
+model UserBet {
+  id            String      @id @default(uuid())
+  user          User        @relation(fields: [user_id], references: [id])
+  user_id       String
+  
+  // Match référence
+  match         Match       @relation(fields: [match_id], references: [id])
+  match_id      String
+  
+  // Type de pari
+  bet_type      String      // "1X2", "Over 2.5", "BTTS", etc.
+  bet_selection String     // "1", "2", "Over", "Under", "Yes", "No"
+  bet_odd       Float       // Cote du pari
+  bet_amount    Float?      // Montant misé (optionnel)
+  potential_win Float?    // Gain potentiel
+  
+  // Résultat
+  status        String      // "pending", "won", "lost", "cancelled"
+  result        String?     // "win", "loss", "push"
+  settled_at    DateTime?   // When the bet was settled
+  
+  created_at    DateTime    @default(now())
+  
+  @@ index([user_id])
+  @@ index([match_id])
+  @@ index([bet_type])
+  @@ index([status])
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// PRONOSTICS — Pronostics IA générés
+// ─────────────────────────────────────────────────────────────────────────────
+model Pronostic {
+  id            String      @id @default(uuid())
+  match         Match       @relation(fields: [match_id], references: [id])
+  match_id      String
+  
+  // Probas 1X2
+  prob_1        Float       // Probabilité victoire domicile
+  prob_N        Float       // Probabilité match nul
+  prob_2        Float       // Probabilité victoire extérieur
+  
+  // Cotes calculées
+  cote_1        Float       // Cote victoire domicile
+  cote_N        Float       // Cote match nul
+  cote_2        Float       // Cote victoire extérieur
+  
+  // Autres marchés
+  prob_over_2_5 Float      // Probabilité Over 2.5 goals
+  prob_btts     Float       // Probabilité BTTS (Yes/No)
+  
+  // Meilleur pari
+  recommended_bet String     // "1X2", "Over 2.5", "BTTS", etc.
+  confidence    Float      // Niveau de confiance (0.0 - 1.0)
+  
+  // Métadonnées
+  generated_at  DateTime    @default(now())
+  source        String      // "db_first", "espn_scrape", "hybrid"
+  
+  @@ index([match_id])
+  @@ index([generated_at])
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// PARAMÈTRES DE SYSTÈME
+// ─────────────────────────────────────────────────────────────────────────────
+model SystemConfig {
+  key           String      @id
+  value         String
+  updated_at    DateTime    @updatedAt
+  
+  @@ unique([key])
+}

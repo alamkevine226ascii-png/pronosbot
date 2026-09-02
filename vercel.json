@@ -1,17 +1,11 @@
 {
-  "$schema": "https://openapi.vercel.sh/vercel.json",
-  "framework": "nextjs",
-  "buildCommand": "next build",
-  "installCommand": "bun install",
-  "devCommand": "next dev",
-  "regions": ["cdg1"],
-  "functions": {
-    "src/app/api/matchs/route.ts": {
-      "maxDuration": 30
-    },
-    "src/app/api/web-search/route.ts": {
-      "maxDuration": 30
+  "crons": {
+    "/api/cron/sync-matches": {
+      "schedule": "every 30 minutes",
+      "handlerRequest": {
+        "protocol": "http",
+        "default": "post"
+      }
     }
-  },
-  "crons": []
+  }
 }

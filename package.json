@@ -4,7 +4,7 @@
   "private": true,
   "scripts": {
     "dev": "next dev -p 3000 2>&1 | tee dev.log",
-    "build": "next build && cp -r .next/static .next/standalone/.next/ && cp -r public .next/standalone/",
+    "build": "prisma generate && next build && cp -r .next/static .next/standalone/.next/ && cp -r public .next/standalone/",
     "start": "NODE_ENV=production bun .next/standalone/server.js 2>&1 | tee server.log",
     "lint": "eslint ."
   },
@@ -70,7 +70,8 @@
     "vaul": "^1.1.2",
     "z-ai-web-dev-sdk": "^0.0.18",
     "zod": "^4.0.2",
-    "zustand": "^5.0.6"
+    "zustand": "^5.0.6",
+    "@prisma/client": "^5.21.1"
   },
   "devDependencies": {
     "@tailwindcss/postcss": "^4",
@@ -81,12 +82,13 @@
     "eslint-config-next": "^16.1.1",
     "tailwindcss": "^4",
     "tw-animate-css": "^1.3.5",
-    "typescript": "^5.9.3"
+    "typescript": "^5.9.3",
+    "prisma": "^5.21.1"
   },
   "description": "Next.js 16 + Prisma + ESPN API + API-Football + Football-Data + LLM (z-ai-web-dev-sdk)",
-    "main": "index.js",
-    "type": "commonjs",
-    "bugs": {
-      "url": "https://github.com/alamkevine226ascii-png/pronosbot/issues"
-    }
+  "main": "index.js",
+  "type": "commonjs",
+  "bugs": {
+    "url": "https://github.com/alamkevine226ascii-png/pronosbot/issues"
+  }
 }

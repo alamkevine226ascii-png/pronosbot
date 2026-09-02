@@ -1,8 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { getFootballDataOdds, findFootballDataOdds } from './football-data';
 import { getApiFootballOdds, findApiFootballOdds } from './api-football';
-import { rateLimitCheck, cacheSet, cacheGetRaw, isRedisEnabled } from '@/lib/redis';
-import { requireAuth } from '@/lib/auth-guard';
 
 const ESPN_BASE = 'https://site.api.espn.com/apis/site/v2/sports/soccer';
 const ESPN_CORE = 'https://sports.core.api.espn.com/v2/sports/soccer';
@@ -871,16 +869,6 @@ function generateCombiners(matchs: any[]): any[] {
   return combiners.slice(0, 6);
 }
 
-// === RATE LIMITING === (le cache global est défini plus bas avec l'ajout Redis)
-const RATE_LIMIT_MAX = 10; // 10 requetes par minute par IP
-
-import { getClientIP } from '@/lib/ip';
-
-async function checkRateLimit(ip: string): Promise<{ allowed: boolean; resetAt: number }> {
-  const result = await rateLimitCheck(`matchs:${ip}`, RATE_LIMIT_MAX, 60);
-  return { allowed: result.allowed, resetAt: result.resetAt };
-}
-
 function validateDate(raw: string | null): string | null {
   if (!raw) return null;
   const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(raw);
@@ -1114,138 +1102,17 @@ async function buildResponseData(rangeStr: string, datesArray: string[]): Promis
 // plan gratuit (10s). Maintenant le cache est persisté dans Redis (si UPSTASH_REDIS_* est
 // configuré) et rechargé au démarrage : un cold start sert l'état précédent instantanément,
 // puis refraîchit en arrière-plan.
-interface CacheEntry { data: any; timestamp: number; refetching?: boolean; storedRedis?: boolean; }
-const apiCache = new Map<string, CacheEntry>();
-const CACHE_TTL = 300_000;     // 5 min  — fresh cache served immediately
-const STALE_TTL = 3_600_000;   // 1 h    — stale cache served + background refetch
-const CACHE_MAX_ENTRIES = 50;  // LRU eviction limit (prevents memory leaks in prod)
-const CACHE_REDIS_PREFIX = 'matchs:resp:'; // Redis key namespace for this response cache
-const CACHE_REDIS_TTL = Math.floor(STALE_TTL / 1000); // 1h, same as STALE_TTL
-
-function setCache(key: string, data: any): void {
-  // BUG FIX (cause racine) : ne JAMAIS cacher une réponse VIDE.
-  // Si ESPN/APIs ont échoué (rate-limit 429, timeout, panne 5xx) et qu'on construit un
-  // payload à 0 matchs, le cacher empoisonne Redis + mémoire LRU pendant jusqu'à
-  // STALE_TTL (1h) : chaque requête servirait ce 0 sans jamais retenter le fetch vers
-  // ESPN (le 0 se ré-empoisonne lui-même via le refetch en arrière-plan). Refuser ici
-  // force le prochain appel à refaire un vrai fetch → auto-guérison après une panne.
-  const matchCount = Array.isArray(data?.matchs) ? data.matchs.length : -1;
-  if (matchCount === 0) {
-    console.error(`[matchs] REFUS de mettre en cache une réponse vide (count=0, key=${key}) — cache non empoisonné, prochain appel re-fetchera ESPN.`);
-    return;
-  }
-  if (matchCount < 0) {
-    console.warn(`[matchs] setCache: payload inattendu (champ "matchs" absent) — refus (key=${key})`);
-    return;
-  }
-  // Write-through to Redis (async, best-effort — cold starts d'autres instances la verront).
-  if (isRedisEnabled) {
-    void cacheSet(`${CACHE_REDIS_PREFIX}${key}`, { data, timestamp: Date.now() }, CACHE_REDIS_TTL)
-      .catch(() => {/* in-memory remains authoritative */});
-  }
-  // In-memory write (BUG-19 FIX : prune avant insert → jamais au-delà du cap sous concurrence,
-  // et delete avant insert → vrai LRU, pas FIFO).
-  apiCache.delete(key); // move existing key to the end (Map = insertion-order) → true LRU
-  apiCache.set(key, { data, timestamp: Date.now() });
-  while (apiCache.size > CACHE_MAX_ENTRIES) {
-    const oldest = apiCache.keys().next().value;
-    if (oldest === undefined) break;
-    apiCache.delete(oldest);
-  }
-}
-
 export async function GET(request: NextRequest) {
-  // === AUTHENTIFICATION (obligatoire) : se connecter d'abord ===
-  const auth = await requireAuth();
-  if (!auth.ok) return auth.response;
-
-  // === RATE LIMITING ===
-  const clientIP = getClientIP(request);
-  const rateLimitResult = await checkRateLimit(clientIP);
-  if (!rateLimitResult.allowed) {
-    const retryAfter = Math.ceil((rateLimitResult.resetAt - Date.now()) / 1000);
-    return NextResponse.json(
-      { error: 'Trop de requêtes. Réessayez dans ' + retryAfter + 's.' },
-      { status: 429, headers: { 'Retry-After': String(retryAfter) } }
-    );
-  }
-
+  // === Parse query parameters
   const searchParams = request.nextUrl.searchParams;
   const weekParam = searchParams.get('week');
   const dateStr = validateDate(searchParams.get('date')) || new Date().toISOString().split('T')[0];
 
-  const cacheKey = `${weekParam ? 'week' : 'day'}_${dateStr}`;
-  const now = Date.now();
-  const cached = apiCache.get(cacheKey);
-  const CACHE_HEADERS = {
-    'Cache-Control': 'public, s-maxage=300, stale-while-revalidate=3600',
-  };
-
-  // 1) Fresh cache (< 5 min): return immediately.
-  if (cached && now - cached.timestamp < CACHE_TTL) {
-    // BUG-19 FIX : touch LRU à la lecture.
-    if (apiCache.has(cacheKey)) {
-      const v = apiCache.get(cacheKey)!;
-      apiCache.delete(cacheKey);
-      apiCache.set(cacheKey, v);
-    }
-    return NextResponse.json(cached.data, {
-      headers: { 'X-Cache': 'HIT', ...CACHE_HEADERS },
-    });
-  }
-
-  // 2) Stale cache (< 1 h): return immediately + fire-and-forget background refetch (SWR).
-  //    The next request will see the refreshed entry and serve it as HIT.
-  if (cached && now - cached.timestamp < STALE_TTL) {
-    if (!cached.refetching) {
-      cached.refetching = true;
-      const { rangeStr, datesArray } = buildDateRange(weekParam, dateStr);
-      void buildResponseData(rangeStr, datesArray)
-        .then((data) => setCache(cacheKey, data))
-        .catch(() => { /* keep stale cache on background refetch error */ })
-        .finally(() => {
-          const e = apiCache.get(cacheKey);
-          if (e) e.refetching = false;
-        });
-    }
-    return NextResponse.json(cached.data, {
-      headers: { 'X-Cache': 'STALE', ...CACHE_HEADERS },
-    });
-  }
-
-  // 3) Cold / expired cache (> 1 h): try Redis cache first (cold-start resilience).
-  if (!cached) {
-    try {
-      const redisEntry = await cacheGetRaw(`${CACHE_REDIS_PREFIX}${cacheKey}`);
-      if (redisEntry && typeof redisEntry === 'object' && 'data' in (redisEntry as any)) {
-        const entry = redisEntry as CacheEntry;
-        // BUG FIX : ne pas hydrater/servir une entrée Redis VIDE (causée par un fetch
-        // échoué qui a été caché avant le correctif ci-dessus). Un 0 empoisonné ne doit
-        // pas ressortir du cold-start : on ignore et on re-fetche (X-Cache: MISS).
-        const redisN = Array.isArray((entry.data as any)?.matchs) ? (entry.data as any).matchs.length : -1;
-        if (redisN === 0) {
-          console.warn(`[matchs] Entrée Redis VIDE (count=0) ignorée pour key=${cacheKey} — re-fetch ESPN.`);
-        } else {
-          // Hydrate memory so subsequent requests serve instant.
-          apiCache.set(cacheKey, { data: entry.data, timestamp: entry.timestamp ?? Date.now() });
-          if (Date.now() - (entry.timestamp ?? 0) < STALE_TTL) {
-            return NextResponse.json(entry.data, {
-              headers: { 'X-Cache': 'REDIS', ...CACHE_HEADERS },
-            });
-          }
-        }
-      }
-    } catch (e) {
-      console.warn('[matchs] Redis read-through échoué:', e instanceof Error ? e.message : 'unknown');
-    }
-  }
-
-  // 4) Really cold: blocking fetch.
+  // === Build date range for ESPN API
   const { rangeStr, datesArray } = buildDateRange(weekParam, dateStr);
-  const responseData = await buildResponseData(rangeStr, datesArray);
-  setCache(cacheKey, responseData);
 
-  return NextResponse.json(responseData, {
-    headers: { 'X-Cache': 'MISS', ...CACHE_HEADERS },
-  });
+  // === Fetch from ESPN all/scoreboard (the only data source needed)
+  const responseData = await buildResponseData(rangeStr, datesArray);
+
+  return NextResponse.json(responseData);
 }

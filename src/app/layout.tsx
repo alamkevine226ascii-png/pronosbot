@@ -1,15 +1,8 @@
 import type { Metadata, Viewport } from "next";
 import { Inter, Geist_Mono } from "next/font/google";
-import AuthProvider from "@/components/auth-provider";
 import "./globals.css";
 import { Toaster as SonnerToaster } from "@/components/ui/sonner";
 import { ServiceWorkerRegister } from "@/components/sw-register";
-
-// SessionProvider fournit un Context React client. Pour éviter que le prerender
-// statique de _not-found (page serveur) tente de résoudre ce Context et échoue
-// ("React Context is unavailable in Server Components"), on force le layout en
-// rendu dynamique.
-export const dynamic = 'force-dynamic';
 
 const inter = Inter({ variable: "--font-inter", subsets: ["latin"] });
 const geistMono = Geist_Mono({ variable: "--font-geist-mono", subsets: ["latin"] });
@@ -71,31 +64,28 @@ export default function RootLayout({ children }: Readonly<{ children: React.Reac
         suppressHydrationWarning
         className={`${inter.variable} ${geistMono.variable} antialiased bg-background text-foreground`}
       >
-        {/* AuthProvider fournit la session NextAuth à toute l'app (connexion obligatoire). */}
-        <AuthProvider>
-          {children}
-          {/* Sonner Toaster — mounted so that `toast.success(...)` calls from
-              page.tsx (import { toast } from 'sonner') actually render. */}
-          <SonnerToaster
-            position="top-center"
-            theme="dark"
-            richColors
-            closeButton
-            toastOptions={{
-              style: {
-                background: '#141414',
-                border: '1px solid rgba(0,255,0,0.3)',
-                color: '#fff',
-              },
-            }}
-          />
-          {/* Service worker registration — moved out of inline
-              `<script dangerouslySetInnerHTML>` into a client component
-              (src/components/sw-register.tsx) for better CSP posture and
-              testability. The component renders null on the server and only
-              runs the registration effect in production. */}
-          <ServiceWorkerRegister />
-        </AuthProvider>
+        {children}
+        {/* Sonner Toaster — mounted so that `toast.success(...)` calls from
+            page.tsx (import { toast } from 'sonner') actually render. */}
+        <SonnerToaster
+          position="top-center"
+          theme="dark"
+          richColors
+          closeButton
+          toastOptions={{
+            style: {
+              background: '#141414',
+              border: '1px solid rgba(0,255,0,0.3)',
+              color: '#fff',
+            },
+          }}
+        />
+        {/* Service worker registration — moved out of inline
+            `<script dangerouslySetInnerHTML>` into a client component
+            (src/components/sw-register.tsx) for better CSP posture and
+            testability. The component renders null on the server and only
+            runs the registration effect in production. */}
+        <ServiceWorkerRegister />
       </body>
     </html>
   );

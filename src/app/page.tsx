@@ -6,7 +6,6 @@ import {
   Home as HomeIcon,
   Target,
   Layers,
-  User,
   RefreshCw,
   Activity,
   TrendingUp,
@@ -62,14 +61,13 @@ import {
 import { toast } from 'sonner';
 import { InstallPrompt } from '@/components/install-prompt';
 import { CookieBanner } from '@/components/cookie-banner';
-import { AccessGate } from '@/components/access-gate';
 import { LegalRgpdCards } from '@/components/legal-rgpd-cards';
 import { WebInsights } from '@/components/web-insights';
 
 /* =========================================================================
  * TYPES
  * ========================================================================= */
-type TabKey = 'home' | 'pronos' | 'combines' | 'profil';
+type TabKey = 'home' | 'pronos' | 'combines';
 
 interface Cotes {
   cote_1: number;
@@ -2552,7 +2550,6 @@ export default function Home() {
   const pronosCount = useMemo(() => matchs.filter((m) => m.pronostic).length, [matchs]);
 
   return (
-    <AccessGate>
     <div className="app-bg flex min-h-screen flex-col text-white">
       {/* HEADER — pt-[env(safe-area-inset-top)] pour les iPhone à notch, py-3 sur mobile / py-4 sur sm+ */}
       <header className="glass-header sticky top-0 z-30 pt-[env(safe-area-inset-top)]">
@@ -2903,280 +2900,9 @@ export default function Home() {
                   ))}
                 </>
               )}
-            </motion.div>
-          )}
-
-          {/* PROFIL TAB */}
-          {activeTab === 'profil' && (
-            <motion.div
-              key="profil"
-              initial={{ opacity: 0, y: 8 }}
-              animate={{ opacity: 1, y: 0 }}
-              exit={{ opacity: 0, y: -8 }}
-              transition={{ duration: 0.2 }}
-              className="space-y-4"
-            >
-              {/* App identity — logo + title + version pill */}
-              <motion.div
-                initial={{ opacity: 0, y: 12 }}
-                animate={{ opacity: 1, y: 0 }}
-                transition={{ duration: 0.3, delay: 0 }}
-              >
-                <Card className="glass-card relative overflow-hidden rounded-xl p-5">
-                  {/* Top neon accent line */}
-                  <div
-                    className="absolute left-0 top-0 h-0.5 w-full"
-                    style={{
-                      background: `linear-gradient(90deg, transparent 0%, ${GREEN} 30%, ${GREEN} 70%, transparent 100%)`,
-                      boxShadow: `0 2px 8px rgba(0,255,0,0.3)`,
-                    }}
-                  />
-                  <div
-                    className="pointer-events-none absolute -right-12 -top-12 h-40 w-40 rounded-full opacity-15 blur-3xl"
-                    style={{ backgroundColor: GREEN }}
-                    aria-hidden
-                  />
-                  <div className="relative flex items-center gap-4">
-                    <div
-                      className="flex h-14 w-14 items-center justify-center rounded-2xl border border-[#00FF00]/30 bg-[#00FF00]/12"
-                      style={{ boxShadow: `0 2px 8px rgba(0,255,0,0.25)` }}
-                    >
-                      <Brain className="h-7 w-7 text-[#00FF00]" />
-                    </div>
-                    <div className="flex-1">
-                      <div className="flex items-center gap-2">
-                        <h2 className="text-2xl font-black text-white" style={{ textShadow: 'none' }}>
-                          Prono<span className="text-[#00FF00]">Bot</span>
-                        </h2>
-                        <span className="inline-flex items-center rounded-full border border-[#00FF00]/30 bg-[#00FF00]/10 px-2 py-0.5 text-[10px] font-bold uppercase tracking-wide text-[#00FF00]">
-                          v2.1.0
-                        </span>
-                      </div>
-                      <p className="mt-0.5 text-xs text-zinc-500">PWA · Foot Analytics</p>
-                    </div>
-                  </div>
-                </Card>
-              </motion.div>
-              <div className="h-px bg-gradient-to-r from-transparent via-zinc-800 to-transparent" />
-
-              {/* API Status — premium rows with icons */}
-              <motion.div
-                initial={{ opacity: 0, y: 12 }}
-                animate={{ opacity: 1, y: 0 }}
-                transition={{ duration: 0.3, delay: 0.05 }}
-              >
-                <Card className="glass-card rounded-xl p-5">
-                  <SectionTitle icon={Database}>État des API</SectionTitle>
-                  <div className="space-y-2.5">
-                    <ApiStatusRow
-                      icon={Activity}
-                      name="ESPN Scoreboard"
-                      status={error ? 'error' : loading ? 'loading' : 'ok'}
-                      detail={
-                        error
-                          ? 'Erreur'
-                          : loading
-                          ? 'Chargement...'
-                          : `${matchs.length} matchs chargés`
-                      }
-                    />
-                    <ApiStatusRow
-                      icon={Brain}
-                      name="DeepSeek AI"
-                      status="ok"
-                      detail="Analyse web active"
-                    />
-                    <ApiStatusRow
-                      icon={DollarSign}
-                      name="DraftKings Odds"
-                      status="loading"
-                      detail="Partiellement réelles (~62% estimées)"
-                    />
-                    <ApiStatusRow
-                      icon={Layers}
-                      name="Moteur de combinés"
-                      status={combiners.length > 0 ? 'ok' : 'loading'}
-                      detail={
-                        combiners.length > 0
-                          ? `${combiners.length} combinés générés`
-                          : 'En attente de matchs éligibles'
-                      }
-                    />
-                  </div>
-                </Card>
-              </motion.div>
-              <div className="h-px bg-gradient-to-r from-transparent via-zinc-800 to-transparent" />
-
-              {/* Stats summary — 2x2 mobile, 4 cols desktop */}
-              <motion.div
-                initial={{ opacity: 0, y: 12 }}
-                animate={{ opacity: 1, y: 0 }}
-                transition={{ duration: 0.3, delay: 0.1 }}
-              >
-                <Card className="glass-card rounded-xl p-5">
-                  <SectionTitle icon={BarChart3}>Statistiques</SectionTitle>
-                  <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">
-                    <StatBox
-                      label="Matchs analysés"
-                      value={matchs.length.toString()}
-                      icon={Target}
-                    />
-                    <StatBox
-                      label="Pronos générés"
-                      value={pronosCount.toString()}
-                      icon={Sparkles}
-                      accent="green"
-                    />
-                    <StatBox
-                      label="Combinés dispo"
-                      value={combiners.length.toString()}
-                      icon={Layers}
-                      accent="green"
-                    />
-                    <StatBox
-                      label="Matchs en live"
-                      value={liveCount.toString()}
-                      icon={Radio}
-                      accent={liveCount > 0 ? 'green' : undefined}
-                    />
-                  </div>
-                </Card>
-              </motion.div>
-              <div className="h-px bg-gradient-to-r from-transparent via-zinc-800 to-transparent" />
-
-              {/* Settings */}
-              <motion.div
-                initial={{ opacity: 0, y: 12 }}
-                animate={{ opacity: 1, y: 0 }}
-                transition={{ duration: 0.3, delay: 0.15 }}
-              >
-                <Card className="glass-card rounded-xl p-5">
-                  <SectionTitle icon={Settings}>Paramètres</SectionTitle>
-                  <div className="space-y-3">
-                    <div className="flex items-center justify-between rounded-lg border border-[#2A2A2A] bg-[#222222]/30 p-3 transition-colors hover:border-[#00FF00]/20">
-                      <div>
-                        <p className="text-sm font-medium text-zinc-200">Rafraîchissement auto</p>
-                        <p className="text-[11px] text-zinc-500">Scores live toutes les 60s</p>
-                      </div>
-                      <Switch defaultChecked className="data-[state=checked]:bg-[#00FF00]" />
-                    </div>
-                    <div className="flex items-center justify-between rounded-lg border border-[#2A2A2A] bg-[#222222]/30 p-3 transition-colors hover:border-[#00FF00]/20">
-                      <div>
-                        <p className="text-sm font-medium text-zinc-200">Notifications combinés</p>
-                        <p className="text-[11px] text-zinc-500">Alerte à chaque nouveau combiné</p>
-                      </div>
-                      <Switch className="data-[state=checked]:bg-[#00FF00]" />
-                    </div>
-                  </div>
-                </Card>
-              </motion.div>
-              <div className="h-px bg-gradient-to-r from-transparent via-zinc-800 to-transparent" />
-
-              {/* About — 9 bet types in a grid with descriptions */}
-              <motion.div
-                initial={{ opacity: 0, y: 12 }}
-                animate={{ opacity: 1, y: 0 }}
-                transition={{ duration: 0.3, delay: 0.2 }}
-              >
-                <Card className="glass-card rounded-xl p-5">
-                  <SectionTitle icon={Brain}>À propos</SectionTitle>
-                  <p className="text-sm leading-relaxed text-zinc-400">
-                    PronoBot analyse les matchs de football en temps réel grâce aux données
-                    ESPN et aux cotes DraftKings. Pour chaque match, le bot calcule 9 types
-                    de paris et génère automatiquement les meilleurs combinés du jour.
-                  </p>
-                  <div className="mt-4 grid grid-cols-1 gap-2 sm:grid-cols-2">
-                    {[
-                      { type: '1X2', desc: 'Victoire domicile, nul ou victoire extérieur' },
-                      { type: 'Double Chance', desc: 'Double Chance 1N, 12, N2 (3 options)' },
-                      { type: 'Plus de Buts', desc: 'Plus de 1.5, 2.5 ou 3.5 buts' },
-                      { type: 'BTTS', desc: 'Les deux équipes vont marquer (Oui/Non)' },
-                      { type: 'DC + BTTS', desc: 'Double Chance + Les 2 équipes marquent (combiné)' },
-                      { type: 'Buteur', desc: 'Nom du buteur probable (équipe la plus susceptible de marquer)' },
-                      { type: 'Mi-temps', desc: 'Résultat mi-temps / fin de match' },
-                      { type: 'Score exact', desc: 'Score final précis (top 3)' },
-                      { type: 'Qualification', desc: 'Équipe qualifiée (matchs à élimination directe)' },
-                    ].map((b) => (
-                      <div
-                        key={b.type}
-                        className="flex items-center gap-2 rounded-lg border border-[#2A2A2A] bg-[#1A1A1A]/40 p-2 transition-colors hover:border-[#00FF00]/20"
-                      >
-                        <BetTypeBadge type={b.type} />
-                        <span className="truncate text-[11px] text-zinc-400">{b.desc}</span>
-                      </div>
-                    ))}
-                  </div>
-                </Card>
-              </motion.div>
-              <div className="h-px bg-gradient-to-r from-transparent via-zinc-800 to-transparent" />
-
-              {/* Installer l'app (PWA) */}
-              <motion.div
-                initial={{ opacity: 0, y: 12 }}
-                animate={{ opacity: 1, y: 0 }}
-                transition={{ duration: 0.3, delay: 0.22 }}
-              >
-                <InstallAppCard />
-              </motion.div>
-              <div className="h-px bg-gradient-to-r from-transparent via-zinc-800 to-transparent" />
-
-              {/* Mentions légales + RGPD — extrait dans /components/legal-rgpd-cards.tsx */}
-              <LegalRgpdCards />
-              <div className="h-px bg-gradient-to-r from-transparent via-zinc-800 to-transparent" />
-
-              {/* Reset data */}
-              <motion.div
-                initial={{ opacity: 0, y: 12 }}
-                animate={{ opacity: 1, y: 0 }}
-                transition={{ duration: 0.3, delay: 0.25 }}
-              >
-                <Card className="glass-card rounded-xl p-5 !border-red-500/20">
-                  <SectionTitle icon={AlertTriangle}>Maintenance</SectionTitle>
-                  <AlertDialog>
-                    <AlertDialogTrigger asChild>
-                      <Button
-                        variant="outline"
-                        className="w-full border-red-500/30 bg-red-500/10 text-red-400 hover:bg-red-500/20 hover:text-red-400"
-                      >
-                        <RefreshCw className="mr-2 h-4 w-4" /> Recharger les données
-                      </Button>
-                    </AlertDialogTrigger>
-                    <AlertDialogContent className="glass-card border-[#00FF00]/15">
-                      <AlertDialogHeader>
-                        <AlertDialogTitle className="text-white">
-                          Recharger toutes les données ?
-                        </AlertDialogTitle>
-                        <AlertDialogDescription className="text-zinc-400">
-                          Les matchs, pronostics et combinés seront re-téléchargés depuis
-                          l'API ESPN. Cela peut prendre quelques secondes.
-                        </AlertDialogDescription>
-                      </AlertDialogHeader>
-                      <AlertDialogFooter>
-                        <AlertDialogCancel className="border-[#00FF00]/20 bg-[#1A1A1A] text-zinc-200">
-                          Annuler
-                        </AlertDialogCancel>
-                        <AlertDialogAction
-                          onClick={() => {
-                            fetchMatchs(true);
-                            toast.success('Données rechargées');
-                          }}
-                          className="bg-[#00FF00] text-black hover:bg-[#00CC00]"
-                        >
-                          Recharger
-                        </AlertDialogAction>
-                      </AlertDialogFooter>
-                    </AlertDialogContent>
-                  </AlertDialog>
-                </Card>
-              </motion.div>
-
-              <p className="pb-2 text-center text-[11px] text-zinc-600">
-                PronoBot v2.1.0 · Données ESPN · Fait avec{' '}
-                <span className="text-[#00FF00]">♥</span> pour les passionnés de foot
-              </p>
-            </motion.div>
-          )}
-        </AnimatePresence>
+                      </motion.div>
+                    )}
+                  </AnimatePresence>
       </main>
 
       {/* BOTTOM NAV */}
@@ -3201,12 +2927,6 @@ export default function Home() {
             label="Combinés"
             badge={combiners.length || undefined}
           />
-          <NavButton
-            active={activeTab === 'profil'}
-            onClick={() => setActiveTab('profil')}
-            icon={User}
-            label="Profil"
-          />
         </div>
       </nav>
 
@@ -3216,7 +2936,6 @@ export default function Home() {
       {/* RGPD cookie banner */}
       <CookieBanner />
     </div>
-    </AccessGate>
   );
 }
 
